@@ -5,8 +5,8 @@ import uuid
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from fadem.memory.utils import matches_filters
-from fadem.vector_stores.base import VectorStoreBase
+from engram.memory.utils import matches_filters
+from engram.vector_stores.base import VectorStoreBase
 
 
 @dataclass

@@ -64,7 +64,7 @@ qdrant_storage/
 
 # History and cache directories
 .engram/
-.fadem/
+.engram/
 history.db
 engram_history.db
 fadem_history.db

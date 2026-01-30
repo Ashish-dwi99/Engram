@@ -144,7 +144,7 @@ Input: "User prefers TypeScript over JavaScript"
 - **Dynamic Categories** — Auto-discovered from content, not predefined
 - **Hierarchical Structure** — Nested categories (preferences > coding > languages)
 - **Evolving Summaries** — LLM-generated summaries that update with new memories
-- **Category Decay** — Unused categories weaken and merge (bio-inspired, like FadeMem)
+- **Category Decay** — Unused categories weaken and merge 
 - **Category Embeddings** — Categories have their own vectors for semantic matching
 - **Category-Aware Retrieval** — Boost search results from relevant categories
 

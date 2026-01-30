@@ -8,7 +8,7 @@ class VectorStoreConfig(BaseModel):
     provider: str = Field(default="qdrant")
     config: Dict[str, Any] = Field(
         default_factory=lambda: {
-            "path": os.path.join(os.path.expanduser("~"), ".fadem", "qdrant"),
+            "path": os.path.join(os.path.expanduser("~"), ".engram", "qdrant"),
             "collection_name": "fadem_memories",
         }
     )
@@ -65,7 +65,7 @@ class CategoryMemConfig(BaseModel):
     auto_categorize: bool = True  # Automatically categorize new memories
     use_llm_categorization: bool = True  # Use LLM for ambiguous categorization
 
-    # Category decay (bio-inspired, like FadeMem)
+    # Category decay (bio-inspired, like engram)
     enable_category_decay: bool = True
     category_decay_rate: float = 0.05  # Decay rate per cycle
     merge_weak_categories: bool = True  # Merge weak categories automatically
@@ -104,7 +104,7 @@ class MemoryConfig(BaseModel):
     embedder: EmbedderConfig = Field(default_factory=EmbedderConfig)
     graph_store: GraphStoreConfig = Field(default_factory=GraphStoreConfig)
     history_db_path: str = Field(
-        default_factory=lambda: os.path.join(os.path.expanduser("~"), ".fadem", "history.db")
+        default_factory=lambda: os.path.join(os.path.expanduser("~"), ".engram", "history.db")
     )
     collection_name: str = "fadem_memories"
     embedding_model_dims: int = 3072  # gemini-embedding-001 default dimensions
@@ -114,6 +114,6 @@ class MemoryConfig(BaseModel):
     custom_fusion_prompt: Optional[str] = None
     custom_echo_prompt: Optional[str] = None
     custom_category_prompt: Optional[str] = None
-    fadem: FadeMemConfig = Field(default_factory=FadeMemConfig)
+    engram: FadeMemConfig = Field(default_factory=FadeMemConfig)
     echo: EchoMemConfig = Field(default_factory=EchoMemConfig)
     category: CategoryMemConfig = Field(default_factory=CategoryMemConfig)

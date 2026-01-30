@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Quick test script for FadeMem - run this to verify your setup works."""
+"""Quick test script for engram - run this to verify your setup works."""
 
 import os
 import sys
@@ -8,11 +8,11 @@ import sys
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 def test_fadem():
-    from fadem import Memory
-    from fadem.configs.base import MemoryConfig, VectorStoreConfig, LLMConfig, EmbedderConfig, FadeMemConfig
+    from engram import Memory
+    from engram.configs.base import MemoryConfig, VectorStoreConfig, LLMConfig, EmbedderConfig, FadeMemConfig
 
     print("=" * 60)
-    print("FadeMem Quick Test")
+    print("engram Quick Test")
     print("=" * 60)
 
     # Configure with in-memory vector store for quick testing
@@ -40,7 +40,7 @@ def test_fadem():
             }
         ),
         history_db_path="/tmp/fadem_test_history.db",
-        fadem=FadeMemConfig(
+        engram=FadeMemConfig(
             enable_forgetting=True,
             sml_decay_rate=0.15,
             lml_decay_rate=0.02,
@@ -107,7 +107,7 @@ def test_fadem():
     print(f"    Promoted: {decay_result.get('promoted')}")
 
     print("\n" + "=" * 60)
-    print("All tests passed! FadeMem is ready to use.")
+    print("All tests passed! engram is ready to use.")
     print("=" * 60)
 
     return True
@@ -115,8 +115,8 @@ def test_fadem():
 
 def test_openai_provider():
     """Test with OpenAI provider instead of Gemini."""
-    from fadem import Memory
-    from fadem.configs.base import MemoryConfig, VectorStoreConfig, LLMConfig, EmbedderConfig
+    from engram import Memory
+    from engram.configs.base import MemoryConfig, VectorStoreConfig, LLMConfig, EmbedderConfig
 
     print("\n[OpenAI Provider Test]")
 

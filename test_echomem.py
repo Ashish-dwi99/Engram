@@ -1,15 +1,15 @@
 """
-Test script for EchoMem integration with FadeMem.
+Test script for EchoMem integration with engram.
 """
 
 import os
 import sys
 
-# Ensure we're using the local fadem package
+# Ensure we're using the local engram package
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fadem import Memory
-from fadem.core.echo import EchoProcessor, EchoDepth
+from engram import Memory
+from engram.core.echo import EchoProcessor, EchoDepth
 
 
 def test_echo_depth_detection():
@@ -17,7 +17,7 @@ def test_echo_depth_detection():
     print("\n=== Test 1: Echo Depth Detection ===\n")
 
     # Create a mock LLM for testing (we'll test the depth detection logic directly)
-    from fadem.core.echo import EchoProcessor
+    from engram.core.echo import EchoProcessor
 
     class MockLLM:
         def generate(self, prompt):
@@ -80,7 +80,7 @@ def test_echo_metadata():
     """Test that echo results convert to metadata correctly."""
     print("\n=== Test 3: Echo Metadata Conversion ===\n")
 
-    from fadem.core.echo import EchoResult, EchoDepth
+    from engram.core.echo import EchoResult, EchoDepth
 
     result = EchoResult(
         raw="User prefers TypeScript",
@@ -191,8 +191,8 @@ def test_full_integration():
 
     try:
         import tempfile
-        from fadem import Memory
-        from fadem.configs.base import MemoryConfig, EchoMemConfig, VectorStoreConfig, EmbedderConfig, LLMConfig
+        from engram import Memory
+        from engram.configs.base import MemoryConfig, EchoMemConfig, VectorStoreConfig, EmbedderConfig, LLMConfig
 
         # Use a temporary directory for test to avoid conflicts
         test_dir = tempfile.mkdtemp(prefix="echomem_test_")

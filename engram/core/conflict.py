@@ -2,7 +2,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
-from fadem.utils.prompts import CONFLICT_RESOLUTION_PROMPT
+from engram.utils.prompts import CONFLICT_RESOLUTION_PROMPT
 
 
 @dataclass

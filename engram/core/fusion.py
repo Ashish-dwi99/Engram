@@ -2,7 +2,7 @@ import json
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from fadem.utils.prompts import FUSION_PROMPT
+from engram.utils.prompts import FUSION_PROMPT
 
 
 @dataclass

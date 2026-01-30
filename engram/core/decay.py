@@ -3,7 +3,7 @@ from datetime import datetime
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
-    from fadem.configs.base import FadeMemConfig
+    from engram.configs.base import FadeMemConfig
 
 
 def calculate_decayed_strength(

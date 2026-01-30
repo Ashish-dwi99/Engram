@@ -1,4 +1,4 @@
-from fadem.configs.base import (
+from engram.configs.base import (
     EchoMemConfig,
     EmbedderConfig,
     FadeMemConfig,

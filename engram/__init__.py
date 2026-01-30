@@ -1,17 +1,17 @@
-"""FadeMem package exports.
+"""engram package exports.
 
-FadeMem: Biologically-inspired memory for AI agents
-- FadeMem: Dual-layer (SML/LML) with natural decay
+engram: Biologically-inspired memory for AI agents
+- engram: Dual-layer (SML/LML) with natural decay
 - EchoMem: Multi-modal encoding for stronger retention
 - CategoryMem: Dynamic hierarchical category organization
 """
 
-from fadem.memory.main import Memory
-from fadem.memory.client import MemoryClient
-from fadem.memory.async_memory import AsyncMemory
-from fadem.core.category import CategoryProcessor, Category, CategoryType, CategoryMatch
-from fadem.core.echo import EchoProcessor, EchoDepth, EchoResult
-from fadem.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, CategoryMemConfig
+from engram.memory.main import Memory
+from engram.memory.client import MemoryClient
+from engram.memory.async_memory import AsyncMemory
+from engram.core.category import CategoryProcessor, Category, CategoryType, CategoryMatch
+from engram.core.echo import EchoProcessor, EchoDepth, EchoResult
+from engram.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, CategoryMemConfig
 
 __version__ = "0.1.3"  # CategoryMem release
 __all__ = [

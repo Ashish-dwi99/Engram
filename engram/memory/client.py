@@ -2,12 +2,12 @@ from typing import Any, Dict, List, Optional
 
 
 class MemoryClient:
-    """Thin HTTP client for remote FadeMem server."""
+    """Thin HTTP client for remote engram server."""
 
     def __init__(
         self,
         api_key: str = None,
-        host: str = "https://api.fadem.ai",
+        host: str = "https://api.engram.ai",
         org_id: str = None,
         project_id: str = None,
     ):

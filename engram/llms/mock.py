@@ -1,7 +1,7 @@
 import json
 from typing import Optional
 
-from fadem.llms.base import BaseLLM
+from engram.llms.base import BaseLLM
 
 
 class MockLLM(BaseLLM):

@@ -6,17 +6,17 @@ import uuid
 from datetime import datetime, date
 from typing import Any, Dict, List, Optional, Union
 
-from fadem.configs.base import MemoryConfig
-from fadem.core.decay import calculate_decayed_strength, should_forget, should_promote
-from fadem.core.conflict import resolve_conflict
-from fadem.core.echo import EchoProcessor, EchoDepth
-from fadem.core.fusion import fuse_memories
-from fadem.core.retrieval import composite_score
-from fadem.core.category import CategoryProcessor, CategoryMatch
-from fadem.db.sqlite import SQLiteManager
-from fadem.exceptions import FadeMemValidationError
-from fadem.memory.base import MemoryBase
-from fadem.memory.utils import (
+from engram.configs.base import MemoryConfig
+from engram.core.decay import calculate_decayed_strength, should_forget, should_promote
+from engram.core.conflict import resolve_conflict
+from engram.core.echo import EchoProcessor, EchoDepth
+from engram.core.fusion import fuse_memories
+from engram.core.retrieval import composite_score
+from engram.core.category import CategoryProcessor, CategoryMatch
+from engram.db.sqlite import SQLiteManager
+from engram.exceptions import FadeMemValidationError
+from engram.memory.base import MemoryBase
+from engram.memory.utils import (
     build_filters_and_metadata,
     matches_filters,
     normalize_categories,
@@ -24,14 +24,14 @@ from fadem.memory.utils import (
     parse_messages,
     strip_code_fences,
 )
-from fadem.utils.factory import EmbedderFactory, LLMFactory, VectorStoreFactory
-from fadem.utils.prompts import AGENT_MEMORY_EXTRACTION_PROMPT, MEMORY_EXTRACTION_PROMPT
+from engram.utils.factory import EmbedderFactory, LLMFactory, VectorStoreFactory
+from engram.utils.prompts import AGENT_MEMORY_EXTRACTION_PROMPT, MEMORY_EXTRACTION_PROMPT
 
 logger = logging.getLogger(__name__)
 
 
 class Memory(MemoryBase):
-    """FadeMem Memory class - biologically-inspired memory for AI agents."""
+    """engram Memory class - biologically-inspired memory for AI agents."""
 
     def __init__(self, config: Optional[MemoryConfig] = None):
         self.config = config or MemoryConfig()
@@ -44,7 +44,7 @@ class Memory(MemoryBase):
         self.llm = LLMFactory.create(self.config.llm.provider, self.config.llm.config)
         self.embedder = EmbedderFactory.create(self.config.embedder.provider, self.config.embedder.config)
         self.vector_store = VectorStoreFactory.create(self.config.vector_store.provider, self.config.vector_store.config)
-        self.fadem_config = self.config.fadem
+        self.fadem_config = self.config.engram
         self.echo_config = self.config.echo
 
         # Initialize EchoMem processor
@@ -851,7 +851,7 @@ class Memory(MemoryBase):
 
     def apply_category_decay(self) -> Dict[str, Any]:
         """
-        Apply decay to categories - bio-inspired like FadeMem.
+        Apply decay to categories
 
         Unused categories weaken and may merge with similar ones.
 

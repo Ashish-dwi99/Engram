@@ -3,7 +3,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
-from fadem.vector_stores.base import VectorStoreBase
+from engram.vector_stores.base import VectorStoreBase
 
 
 @dataclass

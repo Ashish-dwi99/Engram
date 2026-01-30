@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-Example: Using FadeMem with an AI Agent
+Example: Using engram with an AI Agent
 
-This shows how to integrate FadeMem's biologically-inspired memory
+This shows how to integrate engram's biologically-inspired memory
 in your AI agent workflow.
 """
 
@@ -11,18 +11,18 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from fadem import Memory
-from fadem.configs.base import MemoryConfig, VectorStoreConfig, LLMConfig, EmbedderConfig, FadeMemConfig
+from engram import Memory
+from engram.configs.base import MemoryConfig, VectorStoreConfig, LLMConfig, EmbedderConfig, FadeMemConfig
 
 
 def create_memory() -> Memory:
-    """Create a FadeMem instance configured for your agent."""
+    """Create a engram instance configured for your agent."""
 
     config = MemoryConfig(
         vector_store=VectorStoreConfig(
             provider="qdrant",
             config={
-                "path": os.path.expanduser("~/.fadem/qdrant"),
+                "path": os.path.expanduser("~/.engram/qdrant"),
                 "collection_name": "agent_memories",
                 "embedding_model_dims": 3072,  # gemini-embedding-001
             }
@@ -38,8 +38,8 @@ def create_memory() -> Memory:
             provider="gemini",
             config={"model": "gemini-embedding-001"}
         ),
-        history_db_path=os.path.expanduser("~/.fadem/history.db"),
-        fadem=FadeMemConfig(
+        history_db_path=os.path.expanduser("~/.engram/history.db"),
+        engram=FadeMemConfig(
             enable_forgetting=True,
             sml_decay_rate=0.15,      # Short-term memories decay faster
             lml_decay_rate=0.02,      # Long-term memories persist longer
@@ -52,7 +52,7 @@ def create_memory() -> Memory:
 
 
 class SimpleAgent:
-    """A simple agent that uses FadeMem for memory."""
+    """A simple agent that uses engram for memory."""
 
     def __init__(self, user_id: str):
         self.user_id = user_id
@@ -125,7 +125,7 @@ class SimpleAgent:
 
 def main():
     print("=" * 60)
-    print("FadeMem Agent Example")
+    print("engram Agent Example")
     print("=" * 60)
 
     # Create agent for a user
@@ -160,7 +160,7 @@ def main():
     agent.run_maintenance()
 
     print("\n" + "=" * 60)
-    print("Done! Check ~/.fadem/ for the stored data.")
+    print("Done! Check ~/.engram/ for the stored data.")
     print("=" * 60)
 
 

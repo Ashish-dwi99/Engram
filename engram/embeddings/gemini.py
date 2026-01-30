@@ -1,7 +1,7 @@
 import os
 from typing import List, Optional
 
-from fadem.embeddings.base import BaseEmbedder
+from engram.embeddings.base import BaseEmbedder
 
 
 class GeminiEmbedder(BaseEmbedder):

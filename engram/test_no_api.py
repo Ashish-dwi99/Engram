@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Test FadeMem without external API keys using mock/simple providers."""
+"""Test engram without external API keys using mock/simple providers."""
 
 import os
 import sys
@@ -10,9 +10,9 @@ sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
 
 def test_with_mock_providers():
-    """Test all FadeMem functionality using mock LLM and simple embedder."""
-    from fadem import Memory
-    from fadem.configs.base import (
+    """Test all engram functionality using mock LLM and simple embedder."""
+    from engram import Memory
+    from engram.configs.base import (
         MemoryConfig,
         VectorStoreConfig,
         LLMConfig,
@@ -21,7 +21,7 @@ def test_with_mock_providers():
     )
 
     print("=" * 60)
-    print("FadeMem Test (No API Keys Required)")
+    print("engram Test (No API Keys Required)")
     print("=" * 60)
 
     # Use in-memory vector store and simple embedder
@@ -44,7 +44,7 @@ def test_with_mock_providers():
             },
         ),
         history_db_path=os.path.join(tempfile.gettempdir(), "fadem_test_mock.db"),
-        fadem=FadeMemConfig(
+        engram=FadeMemConfig(
             enable_forgetting=True,
             sml_decay_rate=0.15,
             lml_decay_rate=0.02,
@@ -156,8 +156,8 @@ def test_with_mock_providers():
 
 def test_with_qdrant():
     """Test with Qdrant vector store (still using mock LLM and simple embedder)."""
-    from fadem import Memory
-    from fadem.configs.base import (
+    from engram import Memory
+    from engram.configs.base import (
         MemoryConfig,
         VectorStoreConfig,
         LLMConfig,
@@ -201,8 +201,8 @@ def test_with_qdrant():
 def test_dimension_mismatch_recovery():
     """Test that Qdrant auto-recreates collection when dimensions change."""
     import shutil
-    from fadem import Memory
-    from fadem.configs.base import (
+    from engram import Memory
+    from engram.configs.base import (
         MemoryConfig,
         VectorStoreConfig,
         LLMConfig,

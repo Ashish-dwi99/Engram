@@ -2,7 +2,7 @@ from typing import Any, Dict, Optional
 
 
 class FadeMemError(Exception):
-    """Base exception for FadeMem errors."""
+    """Base exception for engram errors."""
 
     def __init__(self, message: str, error_code: str = "FADEM_000", details: Optional[Dict[str, Any]] = None, suggestion: Optional[str] = None):
         super().__init__(message)

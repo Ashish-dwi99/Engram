@@ -1,5 +1,5 @@
 """
-CategoryMem - Dynamic hierarchical category layer for FadeMem.
+CategoryMem - Dynamic hierarchical category layer for engram.
 
 Unlike traditional static 3-layer approaches (Resource→Item→Category),
 CategoryMem provides:
@@ -8,7 +8,7 @@ CategoryMem provides:
 2. Hierarchical Structure - Nested categories (preferences > coding > languages)
 3. Evolving Summaries - LLM-generated summaries that update with new memories
 4. Cross-Category Links - Related categories are semantically linked
-5. Category Decay - Unused categories merge/fade (bio-inspired, like FadeMem)
+5. Category Decay - Unused categories merge/fade (bio-inspired, like engram)
 6. Category Embeddings - Categories have their own vectors for semantic matching
 7. Category-Aware Retrieval - Boost search results from relevant categories
 
@@ -549,7 +549,7 @@ class CategoryProcessor:
 
     def apply_category_decay(self, decay_rate: float = 0.05) -> Dict[str, Any]:
         """
-        Apply decay to categories - bio-inspired like FadeMem.
+        Apply decay to categories - bio-inspired like engram.
 
         Unused categories weaken over time, potentially merging
         with similar categories.

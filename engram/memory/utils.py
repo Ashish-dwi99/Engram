@@ -4,7 +4,7 @@ import hashlib
 from copy import deepcopy
 from typing import Any, Dict, Iterable, List, Optional, Tuple
 
-from fadem.exceptions import FadeMemValidationError
+from engram.exceptions import FadeMemValidationError
 
 
 def normalize_messages(messages: Any) -> List[Dict[str, Any]]:

@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from enum import Enum
 from typing import Any, Dict, List, Optional
 
-from fadem.utils.prompts import ECHO_PROCESSING_PROMPT
+from engram.utils.prompts import ECHO_PROCESSING_PROMPT
 
 logger = logging.getLogger(__name__)
 

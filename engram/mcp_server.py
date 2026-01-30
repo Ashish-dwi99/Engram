@@ -1,7 +1,7 @@
 """
-FadeMem MCP Server for Claude Code integration.
+engram MCP Server for Claude Code integration.
 
-This server exposes FadeMem's memory capabilities as MCP tools that Claude Code can use.
+This server exposes engram's memory capabilities as MCP tools that Claude Code can use.
 """
 
 import json
@@ -13,8 +13,8 @@ from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
-from fadem.memory.main import Memory
-from fadem.configs.base import (
+from engram.memory.main import Memory
+from engram.configs.base import (
     MemoryConfig,
     VectorStoreConfig,
     LLMConfig,
@@ -111,7 +111,7 @@ def get_memory_instance() -> Memory:
     # Configure vector store
     qdrant_path = os.environ.get(
         "FADEM_QDRANT_PATH",
-        os.path.join(os.path.expanduser("~"), ".fadem", "qdrant")
+        os.path.join(os.path.expanduser("~"), ".engram", "qdrant")
     )
     vector_store_config = VectorStoreConfig(
         provider="qdrant",
@@ -125,10 +125,10 @@ def get_memory_instance() -> Memory:
     # Configure history database
     history_db_path = os.environ.get(
         "FADEM_HISTORY_DB",
-        os.path.join(os.path.expanduser("~"), ".fadem", "history.db")
+        os.path.join(os.path.expanduser("~"), ".engram", "history.db")
     )
 
-    # FadeMem-specific settings
+    # engram-specific settings
     fadem_config = FadeMemConfig(
         enable_forgetting=os.environ.get("FADEM_ENABLE_FORGETTING", "true").lower() == "true",
         sml_decay_rate=float(os.environ.get("FADEM_SML_DECAY_RATE", "0.15")),
@@ -141,7 +141,7 @@ def get_memory_instance() -> Memory:
         embedder=embedder_config,
         history_db_path=history_db_path,
         embedding_model_dims=embedding_dims,
-        fadem=fadem_config,
+        engram=fadem_config,
     )
 
     return Memory(config)
@@ -160,16 +160,16 @@ def get_memory() -> Memory:
 
 
 # Create the MCP server
-server = Server("fadem-memory")
+server = Server("engram-memory")
 
 
 @server.list_tools()
 async def list_tools() -> List[Tool]:
-    """List available FadeMem tools."""
+    """List available engram tools."""
     return [
         Tool(
             name="add_memory",
-            description="Add a new memory to FadeMem. Use this to remember important facts, preferences, or context about the user or conversation.",
+            description="Add a new memory to engram. Use this to remember important facts, preferences, or context about the user or conversation.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -196,7 +196,7 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="search_memory",
-            description="Search FadeMem for relevant memories. Use this to recall information about the user, previous conversations, or stored context.",
+            description="Search engram for relevant memories. Use this to recall information about the user, previous conversations, or stored context.",
             inputSchema={
                 "type": "object",
                 "properties": {

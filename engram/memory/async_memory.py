@@ -1,8 +1,8 @@
 import asyncio
 from typing import Any, Dict, List, Optional, Union
 
-from fadem.configs.base import MemoryConfig
-from fadem.memory.main import Memory
+from engram.configs.base import MemoryConfig
+from engram.memory.main import Memory
 
 
 class AsyncMemory:
@@ -40,7 +40,7 @@ class AsyncMemory:
     async def reset(self):
         return await asyncio.to_thread(self._sync.reset)
 
-    # FadeMem extras
+    # engram extras
     async def apply_decay(self, scope: Dict[str, Any] = None):
         return await asyncio.to_thread(self._sync.apply_decay, scope)
 
