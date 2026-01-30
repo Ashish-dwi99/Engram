@@ -23,17 +23,17 @@ Do NOT extract:
 - Questions without answers
 
 Respond ONLY with valid JSON in this exact format:
-{
+{{
     "memories": [
-        {
+        {{
             "content": "The specific fact or preference to remember",
             "category": "preference|fact|goal|relationship|context|event",
             "importance": "high|medium|low",
             "confidence": 0.0-1.0
-        }
+        }}
     ],
     "reasoning": "Brief explanation of why these were selected"
-}
+}}
 
 Rules:
 - Each memory should be a standalone, self-contained statement
@@ -69,17 +69,17 @@ Do NOT extract:
 - Questions without answers
 
 Respond ONLY with valid JSON in this exact format:
-{
+{{
     "memories": [
-        {
+        {{
             "content": "The specific fact or preference to remember",
             "category": "preference|fact|goal|relationship|context|event",
             "importance": "high|medium|low",
             "confidence": 0.0-1.0
-        }
+        }}
     ],
     "reasoning": "Brief explanation of why these were selected"
-}
+}}
 
 Rules:
 - Each memory should be a standalone, self-contained statement
@@ -108,12 +108,12 @@ Your task is to classify their relationship into exactly ONE of these categories
 4. SUBSUMED - The existing memory is more general and already encompasses the new memory.
 
 Respond ONLY with valid JSON in this exact format:
-{
+{{
     "classification": "COMPATIBLE|CONTRADICTORY|SUBSUMES|SUBSUMED",
     "confidence": 0.0-1.0,
     "merged_content": "...",
     "explanation": "Brief 1-2 sentence explanation"
-}
+}}
 
 Rules:
 - "merged_content" should ONLY be provided if classification is "SUBSUMES" - otherwise use null
@@ -185,12 +185,12 @@ INSTRUCTIONS:
 6. Keep the consolidated memory concise but complete
 
 Respond ONLY with valid JSON in this exact format:
-{
+{{
     "consolidated_memory": "The single merged memory statement",
     "preserved_facts": ["fact1", "fact2", ...],
     "discarded_as_redundant": ["redundant info 1", ...],
     "confidence": 0.0-1.0
-}
+}}
 
 Rules:
 - consolidated_memory should be a single, well-formed statement or short paragraph
