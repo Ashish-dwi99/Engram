@@ -181,6 +181,10 @@ async def list_tools() -> List[Tool]:
                         "type": "string",
                         "description": "User identifier to scope this memory to (default: 'default')"
                     },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Agent identifier to scope this memory to (optional)"
+                    },
                     "categories": {
                         "type": "array",
                         "items": {"type": "string"},
@@ -208,6 +212,10 @@ async def list_tools() -> List[Tool]:
                         "type": "string",
                         "description": "User identifier to search memories for (default: 'default')"
                     },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Agent identifier to scope search to (optional)"
+                    },
                     "limit": {
                         "type": "integer",
                         "description": "Maximum number of results to return (default: 10)"
@@ -230,6 +238,10 @@ async def list_tools() -> List[Tool]:
                     "user_id": {
                         "type": "string",
                         "description": "User identifier (default: 'default')"
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Agent identifier to scope results to (optional)"
                     },
                     "limit": {
                         "type": "integer",
@@ -298,6 +310,10 @@ async def list_tools() -> List[Tool]:
                     "user_id": {
                         "type": "string",
                         "description": "User identifier to get stats for (default: all users)"
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Agent identifier to scope stats to (optional)"
                     }
                 }
             }
@@ -311,6 +327,10 @@ async def list_tools() -> List[Tool]:
                     "user_id": {
                         "type": "string",
                         "description": "User identifier to apply decay for (default: all users)"
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Agent identifier to apply decay for (optional)"
                     }
                 }
             }
@@ -328,12 +348,14 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         if name == "add_memory":
             content = arguments.get("content", "")
             user_id = arguments.get("user_id", "default")
+            agent_id = arguments.get("agent_id")
             categories = arguments.get("categories")
             metadata = arguments.get("metadata")
 
             result = memory.add(
                 messages=content,
                 user_id=user_id,
+                agent_id=agent_id,
                 categories=categories,
                 metadata=metadata,
                 infer=False,  # Store the content directly without LLM extraction
@@ -342,12 +364,14 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         elif name == "search_memory":
             query = arguments.get("query", "")
             user_id = arguments.get("user_id", "default")
+            agent_id = arguments.get("agent_id")
             limit = arguments.get("limit", 10)
             categories = arguments.get("categories")
 
             result = memory.search(
                 query=query,
                 user_id=user_id,
+                agent_id=agent_id,
                 limit=limit,
                 categories=categories,
             )
@@ -360,17 +384,20 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                         "score": round(r.get("composite_score", r.get("score", 0)), 3),
                         "layer": r.get("layer", "sml"),
                         "categories": r.get("categories", []),
+                        "scope": r.get("scope"),
                     }
                     for r in result["results"]
                 ]
 
         elif name == "get_all_memories":
             user_id = arguments.get("user_id", "default")
+            agent_id = arguments.get("agent_id")
             limit = arguments.get("limit", 50)
             layer = arguments.get("layer")
 
             result = memory.get_all(
                 user_id=user_id,
+                agent_id=agent_id,
                 limit=limit,
                 layer=layer,
             )
@@ -414,11 +441,13 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
 
         elif name == "get_memory_stats":
             user_id = arguments.get("user_id")
-            result = memory.get_stats(user_id=user_id)
+            agent_id = arguments.get("agent_id")
+            result = memory.get_stats(user_id=user_id, agent_id=agent_id)
 
         elif name == "apply_memory_decay":
             user_id = arguments.get("user_id")
-            scope = {"user_id": user_id} if user_id else None
+            agent_id = arguments.get("agent_id")
+            scope = {"user_id": user_id, "agent_id": agent_id} if user_id or agent_id else None
             result = memory.apply_decay(scope=scope)
 
         else:

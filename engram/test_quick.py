@@ -60,8 +60,8 @@ def test_fadem():
     print("\n[3] Adding memories...")
     result = memory.add(
         messages=[
-            {"role": "user", "content": "I'm a vegetarian and I'm allergic to nuts."},
-            {"role": "assistant", "content": "Got it! I'll remember your dietary restrictions."}
+            {"role": "user", "content": "I prefer plant-based meals."},
+            {"role": "assistant", "content": "Got it! I'll remember your preferences."}
         ],
         user_id="test_user_123"
     )
@@ -79,7 +79,7 @@ def test_fadem():
     # Test search
     print("\n[4] Searching memories...")
     search_result = memory.search(
-        "What are my dietary restrictions?",
+        "What are my food preferences?",
         user_id="test_user_123",
         limit=5
     )

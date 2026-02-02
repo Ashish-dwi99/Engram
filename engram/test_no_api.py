@@ -62,7 +62,7 @@ def test_with_mock_providers():
     # Test add with infer=False (direct add, no LLM)
     print("\n[3] Adding memories (direct, no inference)...")
     result = memory.add(
-        messages="I am a vegetarian and allergic to nuts.",
+        messages="I prefer plant-based meals.",
         user_id="test_user",
         infer=False,
     )
@@ -85,10 +85,28 @@ def test_with_mock_providers():
     )
     print(f"    Added {len(result3.get('results', []))} more memories with categories")
 
+    # Cross-agent connector test
+    print("\n[3b] Testing cross-agent connector...")
+    memory.add(
+        "I prefer Rust for systems work.",
+        user_id="test_user",
+        agent_id="codex",
+        categories=["preferences", "coding"],
+        infer=False,
+    )
+    cross_result = memory.search(
+        "Rust preference",
+        user_id="test_user",
+        agent_id="claude",
+        limit=5,
+    )
+    found_cross = any("Rust" in r.get("memory", "") for r in cross_result.get("results", []))
+    print(f"    Cross-agent preference retrieved: {found_cross}")
+
     # Test search
     print("\n[4] Searching memories...")
     search_result = memory.search(
-        "dietary restrictions",
+        "food preferences",
         user_id="test_user",
         limit=5,
     )

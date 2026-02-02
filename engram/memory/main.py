@@ -7,6 +7,12 @@ from datetime import datetime, date
 from typing import Any, Dict, List, Optional, Union
 
 from engram.configs.base import MemoryConfig
+from engram.core.acceptance import (
+    detect_explicit_intent,
+    detect_sensitive_categories,
+    is_ephemeral,
+    looks_high_confidence,
+)
 from engram.core.decay import calculate_decayed_strength, should_forget, should_promote
 from engram.core.conflict import resolve_conflict
 from engram.core.echo import EchoProcessor, EchoDepth
@@ -28,6 +34,23 @@ from engram.utils.factory import EmbedderFactory, LLMFactory, VectorStoreFactory
 from engram.utils.prompts import AGENT_MEMORY_EXTRACTION_PROMPT, MEMORY_EXTRACTION_PROMPT
 
 logger = logging.getLogger(__name__)
+
+SHAREABLE_CATEGORY_IDS = {
+    "preferences",
+    "procedures",
+    "corrections",
+}
+
+SHAREABLE_CATEGORY_HINTS = (
+    "preference",
+    "workflow",
+    "procedure",
+    "coding",
+    "code",
+    "style",
+    "tooling",
+    "editor",
+)
 
 
 class Memory(MemoryBase):
@@ -148,6 +171,77 @@ class Memory(MemoryBase):
             if app_id:
                 mem_metadata["app_id"] = app_id
 
+            role = mem_metadata.get("role", "user")
+            explicit_intent = detect_explicit_intent(content) if role == "user" else None
+            explicit_action = explicit_intent.action if explicit_intent else None
+            explicit_remember = bool(mem_metadata.get("explicit_remember")) or explicit_action == "remember"
+            explicit_forget = bool(mem_metadata.get("explicit_forget")) or explicit_action == "forget"
+
+            if explicit_forget:
+                query = explicit_intent.content if explicit_intent else ""
+                forget_filters = {"user_id": user_id} if user_id else dict(effective_filters)
+                forget_result = self._forget_by_query(query, forget_filters)
+                results.append(
+                    {
+                        "event": "FORGET",
+                        "query": query,
+                        "deleted_count": forget_result.get("deleted_count", 0),
+                        "deleted_ids": forget_result.get("deleted_ids", []),
+                    }
+                )
+                continue
+
+            if explicit_remember and explicit_intent and explicit_intent.content:
+                content = explicit_intent.content
+
+            blocked = detect_sensitive_categories(content)
+            if blocked:
+                results.append(
+                    {
+                        "event": "BLOCKED",
+                        "reason": "sensitive",
+                        "blocked_categories": blocked,
+                        "memory": content,
+                    }
+                )
+                continue
+
+            if not explicit_remember and is_ephemeral(content):
+                results.append(
+                    {
+                        "event": "SKIP",
+                        "reason": "ephemeral",
+                        "memory": content,
+                    }
+                )
+                continue
+
+            store_agent_id = agent_id
+            store_run_id = run_id
+            store_app_id = app_id
+            store_filters = dict(effective_filters)
+            if "user_id" in store_filters or "agent_id" in store_filters:
+                store_filters.pop("run_id", None)
+
+            if explicit_remember:
+                store_agent_id = None
+                store_run_id = None
+                store_app_id = None
+                store_filters.pop("agent_id", None)
+                store_filters.pop("run_id", None)
+                store_filters.pop("app_id", None)
+                mem_metadata.pop("agent_id", None)
+                mem_metadata.pop("run_id", None)
+                mem_metadata.pop("app_id", None)
+                mem_metadata["policy_scope"] = "user"
+            else:
+                mem_metadata["policy_scope"] = "agent"
+
+            mem_metadata["policy_explicit"] = explicit_remember
+            high_confidence = explicit_remember or looks_high_confidence(content, mem_metadata)
+            policy_repeated = False
+            low_confidence = False
+
             # CategoryMem: Auto-categorize if not provided
             category_match = None
             if (
@@ -188,18 +282,30 @@ class Memory(MemoryBase):
             else:
                 embedding = self.embedder.embed(content, memory_action="add")
 
+            nearest, similarity = self._nearest_memory(embedding, store_filters)
+            repeated_threshold = max(self.fadem_config.conflict_similarity_threshold - 0.05, 0.7)
+            if similarity >= repeated_threshold:
+                policy_repeated = True
+                high_confidence = True
+
+            if not explicit_remember and not high_confidence:
+                low_confidence = True
+
             # Conflict resolution against nearest memory in scope
             event = "ADD"
-            existing = self._find_similar(embedding, effective_filters)
+            existing = None
+            if nearest and similarity >= self.fadem_config.conflict_similarity_threshold:
+                existing = nearest
+
             if existing and self.fadem_config.enable_forgetting:
                 resolution = resolve_conflict(existing, content, self.llm, self.config.custom_conflict_prompt)
 
                 if resolution.classification == "CONTRADICTORY":
-                    self.delete(existing["id"])
+                    self._demote_existing(existing, reason="CONTRADICTORY")
                     event = "UPDATE"
                 elif resolution.classification == "SUBSUMES":
                     content = resolution.merged_content or content
-                    self.delete(existing["id"])
+                    self._demote_existing(existing, reason="SUBSUMES")
                     event = "UPDATE"
                 elif resolution.classification == "SUBSUMED":
                     # Boost existing memory and skip new
@@ -217,8 +323,22 @@ class Memory(MemoryBase):
                     )
                     continue
 
+            if policy_repeated:
+                mem_metadata["policy_repeated"] = True
+            if low_confidence:
+                mem_metadata["policy_low_confidence"] = True
+
+            # If content changed after conflict resolution, re-embed for correctness
+            if existing and event == "UPDATE" and resolution.classification == "SUBSUMES":
+                embedding = self.embedder.embed(content, memory_action="add")
+
+            if low_confidence:
+                effective_strength = min(effective_strength, 0.4)
+
             layer = initial_layer
             if layer == "auto":
+                layer = "sml"
+            if low_confidence:
                 layer = "sml"
 
             memory_id = str(uuid.uuid4())
@@ -226,9 +346,9 @@ class Memory(MemoryBase):
                 "id": memory_id,
                 "memory": content,
                 "user_id": user_id,
-                "agent_id": agent_id,
-                "run_id": run_id,
-                "app_id": app_id,
+                "agent_id": store_agent_id,
+                "run_id": store_run_id,
+                "app_id": store_app_id,
                 "metadata": mem_metadata,
                 "categories": mem_categories,
                 "immutable": immutable,
@@ -243,9 +363,9 @@ class Memory(MemoryBase):
             payload.update({
                 "memory": content,
                 "user_id": user_id,
-                "agent_id": agent_id,
-                "run_id": run_id,
-                "app_id": app_id,
+                "agent_id": store_agent_id,
+                "run_id": store_run_id,
+                "app_id": store_app_id,
                 "categories": mem_categories,
             })
             self.vector_store.insert([embedding], payloads=[payload], ids=[memory_id])
@@ -303,7 +423,33 @@ class Memory(MemoryBase):
             effective_filters["app_id"] = app_id
 
         query_embedding = self.embedder.embed(query, memory_action="search")
-        vector_results = self.vector_store.search(query=query, vectors=query_embedding, limit=limit * 2, filters=effective_filters)
+        vector_results = self.vector_store.search(
+            query=query,
+            vectors=query_embedding,
+            limit=limit * 2,
+            filters=effective_filters,
+        )
+
+        if agent_id and user_id:
+            connector_filters = {
+                key: value
+                for key, value in effective_filters.items()
+                if key not in {"agent_id", "run_id", "app_id"}
+            }
+            connector_filters["user_id"] = user_id
+            connector_results = self.vector_store.search(
+                query=query,
+                vectors=query_embedding,
+                limit=limit * 2,
+                filters=connector_filters,
+            )
+
+            merged = {result.id: result for result in vector_results}
+            for result in connector_results:
+                existing = merged.get(result.id)
+                if not existing or result.score > existing.score:
+                    merged[result.id] = result
+            vector_results = list(merged.values())
 
         # Prepare query terms for echo-based re-ranking
         query_lower = query.lower()
@@ -345,6 +491,18 @@ class Memory(MemoryBase):
             similarity = float(vr.score)
             strength = float(memory.get("strength", 1.0))
             combined = composite_score(similarity, strength)
+            scope = "agent"
+
+            if agent_id:
+                memory_agent = memory.get("agent_id")
+                if memory_agent is None:
+                    scope = "user"
+                    combined *= 1.02
+                elif memory_agent != agent_id:
+                    if not self._is_shareable_memory(memory):
+                        continue
+                    scope = "connector"
+                    combined *= 0.92
 
             # EchoMem: Apply echo-based re-ranking boost
             echo_boost = 0.0
@@ -367,6 +525,11 @@ class Memory(MemoryBase):
 
             if boost_on_access:
                 self.db.increment_access(memory["id"])
+                if self.fadem_config.access_strength_boost > 0:
+                    boosted_strength = min(1.0, strength + self.fadem_config.access_strength_boost)
+                    if boosted_strength != strength:
+                        self.db.update_memory(memory["id"], {"strength": boosted_strength})
+                        strength = boosted_strength
                 self._check_promotion(memory["id"])
                 # EchoMem: Re-echo on frequent access
                 if (
@@ -396,6 +559,7 @@ class Memory(MemoryBase):
                     "access_count": memory.get("access_count", 0),
                     "last_accessed": memory.get("last_accessed"),
                     "composite_score": combined,
+                    "scope": scope,
                     "echo_boost": echo_boost,
                     "category_boost": category_boost,
                 }
@@ -633,8 +797,8 @@ class Memory(MemoryBase):
         fused_id = result.get("results", [{}])[0].get("id") if result.get("results") else None
         return {"fused_id": fused_id, "source_ids": memory_ids, "fused_memory": fused.content}
 
-    def get_stats(self, user_id: str = None) -> Dict[str, Any]:
-        memories = self.db.get_all_memories(user_id=user_id)
+    def get_stats(self, user_id: str = None, agent_id: str = None) -> Dict[str, Any]:
+        memories = self.db.get_all_memories(user_id=user_id, agent_id=agent_id)
         sml_count = sum(1 for m in memories if m.get("layer") == "sml")
         lml_count = sum(1 for m in memories if m.get("layer") == "lml")
         strengths = [m.get("strength", 1.0) for m in memories]
@@ -726,10 +890,103 @@ class Memory(MemoryBase):
         has_assistant_messages = any(msg.get("role") == "assistant" for msg in messages)
         return has_agent_id and has_assistant_messages
 
-    def _find_similar(self, embedding: List[float], filters: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    def _nearest_memory(self, embedding: List[float], filters: Dict[str, Any]) -> tuple[Optional[Dict[str, Any]], float]:
         results = self.vector_store.search(query=None, vectors=embedding, limit=1, filters=filters)
-        if results and results[0].score >= self.fadem_config.conflict_similarity_threshold:
-            return self.db.get_memory(results[0].id)
+        if not results:
+            return None, 0.0
+        memory = self.db.get_memory(results[0].id)
+        if not memory:
+            return None, 0.0
+        return memory, float(results[0].score)
+
+    def _is_shareable_memory(self, memory: Dict[str, Any]) -> bool:
+        if memory.get("agent_id") is None:
+            return True
+
+        categories = [str(c).lower() for c in memory.get("categories", [])]
+        if any(c in SHAREABLE_CATEGORY_IDS for c in categories):
+            return True
+        if any(any(hint in c for hint in SHAREABLE_CATEGORY_HINTS) for c in categories):
+            return True
+
+        metadata = memory.get("metadata", {}) or {}
+        echo_category = str(metadata.get("echo_category") or "").lower()
+        if echo_category and any(hint in echo_category for hint in SHAREABLE_CATEGORY_HINTS):
+            return True
+
+        keywords = metadata.get("echo_keywords") or []
+        for kw in keywords:
+            kw_lower = str(kw).lower()
+            if any(hint in kw_lower for hint in SHAREABLE_CATEGORY_HINTS):
+                return True
+
+        if metadata.get("policy_explicit"):
+            return True
+
+        return False
+
+    def _demote_existing(self, memory: Dict[str, Any], reason: str) -> None:
+        if not memory:
+            return
+        old_strength = float(memory.get("strength", 1.0))
+        old_layer = memory.get("layer", "sml")
+        new_strength = min(old_strength, 0.05)
+        metadata = dict(memory.get("metadata", {}))
+        metadata["superseded"] = True
+        metadata["superseded_reason"] = reason
+        metadata["superseded_at"] = datetime.utcnow().isoformat()
+
+        self.db.update_memory(
+            memory["id"],
+            {
+                "strength": new_strength,
+                "layer": "sml",
+                "metadata": metadata,
+            },
+        )
+
+        existing = self.vector_store.get(memory["id"])
+        if existing:
+            payload = existing.payload
+            payload["strength"] = new_strength
+            payload["layer"] = "sml"
+            payload["metadata"] = metadata
+            self.vector_store.update(memory["id"], payload=payload)
+
+        self.db.log_event(
+            memory["id"],
+            "DEMOTE",
+            old_strength=old_strength,
+            new_strength=new_strength,
+            old_layer=old_layer,
+            new_layer="sml",
+        )
+
+    def _forget_by_query(self, query: str, filters: Dict[str, Any]) -> Dict[str, Any]:
+        cleaned = (query or "").strip()
+        if not cleaned:
+            return {"deleted_count": 0, "deleted_ids": []}
+
+        threshold = max(self.fadem_config.conflict_similarity_threshold, 0.85)
+        query_embedding = self.embedder.embed(cleaned, memory_action="forget")
+        results = self.vector_store.search(query=None, vectors=query_embedding, limit=20, filters=filters)
+
+        deleted_ids: List[str] = []
+        for result in results:
+            if float(result.score) < threshold:
+                continue
+            memory = self.db.get_memory(result.id)
+            if not memory:
+                continue
+            self.delete(result.id)
+            deleted_ids.append(result.id)
+
+        return {"deleted_count": len(deleted_ids), "deleted_ids": deleted_ids}
+
+    def _find_similar(self, embedding: List[float], filters: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        memory, similarity = self._nearest_memory(embedding, filters)
+        if memory and similarity >= self.fadem_config.conflict_similarity_threshold:
+            return memory
         return None
 
     def _check_promotion(self, memory_id: str) -> None:

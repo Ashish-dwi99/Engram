@@ -92,6 +92,7 @@ class FadeMemConfig(BaseModel):
     promotion_access_threshold: int = 3
     promotion_strength_threshold: float = 0.7
     forgetting_threshold: float = 0.1
+    access_strength_boost: float = 0.02
     conflict_similarity_threshold: float = 0.85
     fusion_similarity_threshold: float = 0.90
     enable_fusion: bool = True
