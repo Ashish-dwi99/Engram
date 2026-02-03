@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import uuid
 from typing import Any, Dict, List, Optional
 
 from engram.vector_stores.base import VectorStoreBase
@@ -70,7 +71,11 @@ class QdrantVectorStore(VectorStoreBase):
         from qdrant_client.models import PointStruct
 
         payloads = payloads or [{} for _ in vectors]
-        ids = ids or [str(i) for i in range(len(vectors))]
+        if len(payloads) != len(vectors):
+            raise ValueError("payloads length must match vectors length")
+        if ids is not None and len(ids) != len(vectors):
+            raise ValueError("ids length must match vectors length")
+        ids = ids or [str(uuid.uuid4()) for _ in vectors]
         points = [PointStruct(id=pid, vector=vec, payload=payload) for pid, vec, payload in zip(ids, vectors, payloads)]
         self.client.upsert(collection_name=self.collection_name, points=points)
 

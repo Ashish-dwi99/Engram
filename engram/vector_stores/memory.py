@@ -29,6 +29,10 @@ class InMemoryVectorStore(VectorStoreBase):
 
     def insert(self, vectors: List[List[float]], payloads: Optional[List[Dict[str, Any]]] = None, ids: Optional[List[str]] = None) -> None:
         payloads = payloads or [{} for _ in vectors]
+        if len(payloads) != len(vectors):
+            raise ValueError("payloads length must match vectors length")
+        if ids is not None and len(ids) != len(vectors):
+            raise ValueError("ids length must match vectors length")
         ids = ids or [str(uuid.uuid4()) for _ in vectors]
         for vector_id, vector, payload in zip(ids, vectors, payloads):
             self._store[vector_id] = {"vector": vector, "payload": payload}

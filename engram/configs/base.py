@@ -84,6 +84,14 @@ class CategoryMemConfig(BaseModel):
     auto_create_subcategories: bool = True  # Allow dynamic subcategory creation
 
 
+class ScopeConfig(BaseModel):
+    """Configuration for scope-aware sharing weights."""
+    agent_weight: float = 1.0
+    connector_weight: float = 0.97
+    category_weight: float = 0.94
+    global_weight: float = 0.92
+
+
 class FadeMemConfig(BaseModel):
     enable_forgetting: bool = True
     sml_decay_rate: float = 0.15
@@ -92,6 +100,7 @@ class FadeMemConfig(BaseModel):
     promotion_access_threshold: int = 3
     promotion_strength_threshold: float = 0.7
     forgetting_threshold: float = 0.1
+    access_strength_boost: float = 0.02
     conflict_similarity_threshold: float = 0.85
     fusion_similarity_threshold: float = 0.90
     enable_fusion: bool = True
@@ -117,3 +126,4 @@ class MemoryConfig(BaseModel):
     engram: FadeMemConfig = Field(default_factory=FadeMemConfig)
     echo: EchoMemConfig = Field(default_factory=EchoMemConfig)
     category: CategoryMemConfig = Field(default_factory=CategoryMemConfig)
+    scope: ScopeConfig = Field(default_factory=ScopeConfig)

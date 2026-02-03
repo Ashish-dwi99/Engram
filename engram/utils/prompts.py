@@ -122,41 +122,24 @@ Rules:
 - confidence should reflect how certain you are (0.8+ for high confidence)
 """
 
-ECHO_PROCESSING_PROMPT = """You are processing a memory through multi-modal echo encoding to create stronger memory retention.
+ECHO_PROCESSING_PROMPT = """
+Transform the following memory into a multi-modal "echo" representation. 
+This improves recall by creating multiple neural-like pathways to the same data.
 
-This mimics how humans strengthen memories by "speaking them back" mentally - creating multiple representations improves recall.
+MEMORY: {content}
+DEPTH: {depth}
 
-MEMORY TO PROCESS:
-"{content}"
+Instructions: {depth_instructions}
 
-PROCESSING DEPTH: {depth}
-{depth_instructions}
-
-Generate the following representations:
-
-1. **paraphrase**: Reword the memory in different terms (same meaning, different words)
-2. **keywords**: Extract 3-7 key terms for indexing
-3. **implications**: What can be inferred from this? What does it suggest? (1-3 inferences)
-4. **question_form**: Phrase as a question that this memory answers (for query matching)
-5. **category**: One of: preference, fact, goal, relationship, context, event, credential, habit
-6. **importance**: 0.0-1.0 score based on likely future relevance
-
-Respond ONLY with valid JSON:
+Return ONLY a valid JSON object matching this schema:
 {{
-    "paraphrase": "The rephrased memory",
-    "keywords": ["keyword1", "keyword2", ...],
-    "implications": ["inference1", "inference2"],
-    "question_form": "What question does this answer?",
-    "category": "preference|fact|goal|relationship|context|event|credential|habit",
-    "importance": 0.0-1.0
+  "paraphrases": ["str"], // 3-5 diverse ways to say this
+  "keywords": ["str"],    // essential entities/tags
+  "implications": ["str"], // what this means for future context
+  "questions": ["str"],    // questions this memory answers
+  "category": "fact" | "preference" | "goal" | "relationship" | "event",
+  "importance": 0.0-1.0
 }}
-
-Rules:
-- paraphrase should preserve ALL information but use different wording
-- keywords should be specific, not generic (e.g., "TypeScript" not "programming")
-- implications should be reasonable inferences, not wild guesses
-- question_form should be natural - how would someone ask about this?
-- Be concise but complete
 """
 
 FUSION_PROMPT = """You are consolidating multiple related memories into a single, comprehensive memory.
