@@ -193,6 +193,18 @@ async def list_tools() -> List[Tool]:
                     "metadata": {
                         "type": "object",
                         "description": "Optional metadata to attach to the memory"
+                    },
+                    "agent_category": {
+                        "type": "string",
+                        "description": "Agent category for scope sharing (e.g. 'coding')"
+                    },
+                    "connector_id": {
+                        "type": "string",
+                        "description": "Connector identifier for scope sharing (e.g. 'github')"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "description": "Memory scope: agent|connector|category|global"
                     }
                 },
                 "required": ["content"]
@@ -224,6 +236,20 @@ async def list_tools() -> List[Tool]:
                         "type": "array",
                         "items": {"type": "string"},
                         "description": "Filter results by categories"
+                    },
+                    "agent_category": {
+                        "type": "string",
+                        "description": "Agent category for scope sharing"
+                    },
+                    "connector_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Connector IDs to include for connector-scope memories"
+                    },
+                    "scope_filter": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Restrict results to specific scopes"
                     }
                 },
                 "required": ["query"]
@@ -351,6 +377,9 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             agent_id = arguments.get("agent_id")
             categories = arguments.get("categories")
             metadata = arguments.get("metadata")
+            agent_category = arguments.get("agent_category")
+            connector_id = arguments.get("connector_id")
+            scope = arguments.get("scope")
 
             result = memory.add(
                 messages=content,
@@ -358,6 +387,9 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                 agent_id=agent_id,
                 categories=categories,
                 metadata=metadata,
+                agent_category=agent_category,
+                connector_id=connector_id,
+                scope=scope,
                 infer=False,  # Store the content directly without LLM extraction
             )
 
@@ -367,6 +399,9 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             agent_id = arguments.get("agent_id")
             limit = arguments.get("limit", 10)
             categories = arguments.get("categories")
+            agent_category = arguments.get("agent_category")
+            connector_ids = arguments.get("connector_ids")
+            scope_filter = arguments.get("scope_filter")
 
             result = memory.search(
                 query=query,
@@ -374,6 +409,9 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                 agent_id=agent_id,
                 limit=limit,
                 categories=categories,
+                agent_category=agent_category,
+                connector_ids=connector_ids,
+                scope_filter=scope_filter,
             )
             # Simplify results for readability
             if "results" in result:
@@ -385,6 +423,8 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                         "layer": r.get("layer", "sml"),
                         "categories": r.get("categories", []),
                         "scope": r.get("scope"),
+                        "agent_category": r.get("agent_category"),
+                        "connector_id": r.get("connector_id"),
                     }
                     for r in result["results"]
                 ]

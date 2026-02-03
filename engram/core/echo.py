@@ -10,13 +10,45 @@ from __future__ import annotations
 import json
 import logging
 import re
+import time
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any, Dict, List, Optional
+from functools import wraps
+from typing import Any, Callable, Dict, List, Optional, TypeVar
+
+from pydantic import BaseModel, Field, ValidationError, field_validator
+try:
+    from pydantic import ConfigDict
+except ImportError:  # pragma: no cover - fallback for older pydantic
+    ConfigDict = None
 
 from engram.utils.prompts import ECHO_PROCESSING_PROMPT
 
 logger = logging.getLogger(__name__)
+
+T = TypeVar("T")
+
+def retry_parse(max_retries: int = 2, delay: float = 0.5):
+    """Decorator to retry a function on parsing errors."""
+    def decorator(func: Callable[..., T]) -> Callable[..., T]:
+        @wraps(func)
+        def wrapper(*args, **kwargs) -> T:
+            last_exception = None
+            for i in range(max_retries + 1):
+                try:
+                    return func(*args, **kwargs)
+                except (ValidationError, json.JSONDecodeError) as e:
+                    last_exception = e
+                    if i < max_retries:
+                        logger.warning(f"Parsing failed (attempt {i+1}/{max_retries+1}): {e}. Retrying...")
+                        time.sleep(delay)
+            
+            # If we get here, all retries failed
+            if last_exception:
+                raise last_exception
+            return func(*args, **kwargs) # Should not happen
+        return wrapper
+    return decorator
 
 
 class EchoDepth(str, Enum):
@@ -26,25 +58,89 @@ class EchoDepth(str, Enum):
     DEEP = "deep"         # Full multi-modal echo
 
 
+class EchoOutput(BaseModel):
+    """Structured output from LLM for echo processing."""
+    if ConfigDict:
+        model_config = ConfigDict(extra="ignore")
+
+    paraphrases: List[str] = Field(description="3-5 diverse rephrasings of the memory.")
+    keywords: List[str] = Field(description="Core concepts and entities.")
+    implications: List[str] = Field(default_factory=list, description="Logical consequences or 'if-then' deductions.")
+    questions: List[str] = Field(default_factory=list, description="Questions this memory specifically answers.")
+    question_form: Optional[str] = Field(None, description="Single question-form version of the memory.")
+    category: Optional[str] = Field(None, description="The semantic bucket (e.g., fact, preference, goal).")
+    importance: float = Field(ge=0.0, le=1.0, description="Significance of the information.")
+
+    @field_validator("paraphrases", "keywords", "implications", "questions", mode="before")
+    def _coerce_list(cls, value):
+        if value is None:
+            return []
+        if isinstance(value, list):
+            return value
+        if isinstance(value, str):
+            return [value]
+        return [str(value)]
+
+    @field_validator("paraphrases", "keywords", "implications", "questions", mode="after")
+    def _clean_list(cls, value):
+        cleaned = []
+        for item in value:
+            if not isinstance(item, str):
+                item = str(item)
+            item = item.strip()
+            if item:
+                cleaned.append(item)
+        return cleaned
+
+    @field_validator("category", mode="before")
+    def _clean_category(cls, value):
+        if value is None:
+            return None
+        value = str(value).strip()
+        return value or None
+
+    @field_validator("question_form", mode="before")
+    def _clean_question_form(cls, value):
+        if value is None:
+            return None
+        if isinstance(value, list):
+            if not value:
+                return None
+            value = value[0]
+        value = str(value).strip()
+        return value or None
+
+    @field_validator("importance", mode="before")
+    def _coerce_importance(cls, value):
+        if isinstance(value, str):
+            try:
+                return float(value)
+            except ValueError:
+                return value
+        return value
+
+
 @dataclass
 class EchoResult:
     """Result of echo processing."""
     raw: str
-    paraphrase: Optional[str]
+    paraphrases: List[str]
     keywords: List[str]
     implications: List[str]
-    question_form: Optional[str]
+    questions: List[str]
     category: Optional[str]
     importance: float  # 0.0 - 1.0
     echo_depth: EchoDepth
     strength_multiplier: float  # Based on echo depth
+    question_form: Optional[str] = None
 
     def to_metadata(self) -> Dict[str, Any]:
         """Convert to metadata dict for storage."""
         return {
-            "echo_paraphrase": self.paraphrase,
+            "echo_paraphrases": self.paraphrases,
             "echo_keywords": self.keywords,
             "echo_implications": self.implications,
+            "echo_questions": self.questions,
             "echo_question_form": self.question_form,
             "echo_category": self.category,
             "echo_importance": self.importance,
@@ -188,9 +284,10 @@ class EchoProcessor:
 
         return EchoResult(
             raw=content,
-            paraphrase=None,
+            paraphrases=[],
             keywords=keywords,
             implications=[],
+            questions=[],
             question_form=None,
             category=None,
             importance=0.3,
@@ -204,19 +301,26 @@ class EchoProcessor:
             prompt = ECHO_PROCESSING_PROMPT.format(
                 content=content,
                 depth="medium",
-                depth_instructions="Generate: paraphrase, keywords, category. Skip: implications, question_form.",
+                depth_instructions="Generate: paraphrases, keywords, category. Skip: implications, questions.",
             )
             response = self.llm.generate(prompt)
             parsed = self._parse_echo_response(response)
+            if not parsed.paraphrases or not parsed.keywords:
+                raise ValueError("Echo response missing paraphrases or keywords")
+
+            question_form = parsed.question_form
+            if not question_form and parsed.questions:
+                question_form = parsed.questions[0]
 
             return EchoResult(
                 raw=content,
-                paraphrase=parsed.get("paraphrase"),
-                keywords=parsed.get("keywords", []),
+                paraphrases=parsed.paraphrases,
+                keywords=parsed.keywords,
                 implications=[],
-                question_form=None,
-                category=parsed.get("category"),
-                importance=parsed.get("importance", 0.5),
+                questions=[],
+                question_form=question_form,
+                category=parsed.category,
+                importance=parsed.importance,
                 echo_depth=EchoDepth.MEDIUM,
                 strength_multiplier=self.STRENGTH_MULTIPLIERS[EchoDepth.MEDIUM],
             )
@@ -230,19 +334,26 @@ class EchoProcessor:
             prompt = ECHO_PROCESSING_PROMPT.format(
                 content=content,
                 depth="deep",
-                depth_instructions="Generate ALL fields: paraphrase, keywords, implications, question_form, category.",
+                depth_instructions="Generate ALL fields: paraphrases, keywords, implications, questions, category.",
             )
             response = self.llm.generate(prompt)
             parsed = self._parse_echo_response(response)
+            if not parsed.paraphrases or not parsed.keywords:
+                raise ValueError("Echo response missing paraphrases or keywords")
+
+            question_form = parsed.question_form
+            if not question_form and parsed.questions:
+                question_form = parsed.questions[0]
 
             return EchoResult(
                 raw=content,
-                paraphrase=parsed.get("paraphrase"),
-                keywords=parsed.get("keywords", []),
-                implications=parsed.get("implications", []),
-                question_form=parsed.get("question_form"),
-                category=parsed.get("category"),
-                importance=parsed.get("importance", 0.8),
+                paraphrases=parsed.paraphrases,
+                keywords=parsed.keywords,
+                implications=parsed.implications,
+                questions=parsed.questions,
+                question_form=question_form,
+                category=parsed.category,
+                importance=parsed.importance,
                 echo_depth=EchoDepth.DEEP,
                 strength_multiplier=self.STRENGTH_MULTIPLIERS[EchoDepth.DEEP],
             )
@@ -283,37 +394,59 @@ class EchoProcessor:
 
         return unique[:10]  # Limit to 10 keywords
 
-    def _parse_echo_response(self, response: str) -> Dict[str, Any]:
-        """Parse LLM response for echo data."""
-        # Try to extract JSON from response
-        json_match = re.search(r'```json\s*([\s\S]*?)\s*```', response)
-        if json_match:
-            try:
-                return json.loads(json_match.group(1))
-            except json.JSONDecodeError:
-                pass
-
-        # Try parsing entire response as JSON
+    @retry_parse(max_retries=2)
+    def _parse_echo_response(self, response: str) -> EchoOutput:
+        """Parse LLM response for echo data using Pydantic."""
+        json_str = self._extract_json_blob(response)
         try:
-            return json.loads(response)
-        except json.JSONDecodeError:
-            pass
+            return EchoOutput.model_validate_json(json_str)
+        except (ValidationError, json.JSONDecodeError):
+            repaired = self._repair_json(json_str)
+            try:
+                return EchoOutput.model_validate_json(repaired)
+            except (ValidationError, json.JSONDecodeError):
+                data = self._load_json_dict(repaired)
+                if data is None:
+                    data = self._load_json_dict(json_str)
+                if data is None:
+                    raise
+                normalized = self._normalize_echo_dict(data)
+                return EchoOutput.model_validate(normalized)
 
-        # Fallback: extract what we can
-        result: Dict[str, Any] = {}
+    def _extract_json_blob(self, response: str) -> str:
+        text = (response or "").strip()
+        if not text:
+            return text
+        fence_match = re.search(r"```(?:json)?\s*([\s\S]*?)\s*```", text, re.IGNORECASE)
+        if fence_match:
+            return fence_match.group(1).strip()
+        start = text.find("{")
+        end = text.rfind("}")
+        if start != -1 and end != -1 and end > start:
+            return text[start:end + 1].strip()
+        return text
 
-        # Try to find paraphrase
-        para_match = re.search(r'"paraphrase":\s*"([^"]+)"', response)
-        if para_match:
-            result["paraphrase"] = para_match.group(1)
+    def _repair_json(self, text: str) -> str:
+        if not text:
+            return text
+        # Remove trailing commas before } or ]
+        repaired = re.sub(r",(\s*[}\]])", r"\1", text)
+        return repaired
 
-        # Try to find keywords
-        kw_match = re.search(r'"keywords":\s*\[([^\]]+)\]', response)
-        if kw_match:
-            keywords = re.findall(r'"([^"]+)"', kw_match.group(1))
-            result["keywords"] = keywords
+    def _load_json_dict(self, text: str) -> Optional[Dict[str, Any]]:
+        try:
+            data = json.loads(text)
+        except Exception:
+            return None
+        return data if isinstance(data, dict) else None
 
-        return result
+    def _normalize_echo_dict(self, data: Dict[str, Any]) -> Dict[str, Any]:
+        normalized = dict(data)
+        if "paraphrases" not in normalized and "paraphrase" in normalized:
+            normalized["paraphrases"] = normalized.pop("paraphrase")
+        if "questions" not in normalized and "question_form" in normalized:
+            normalized["questions"] = normalized.get("question_form")
+        return normalized
 
     def reecho(self, memory: Dict[str, Any]) -> EchoResult:
         """

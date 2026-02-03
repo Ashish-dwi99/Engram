@@ -97,6 +97,11 @@ $RECYCLE.BIN/
 htmlcov/
 .tox/
 .hypothesis/
+test_*.py
+*_test.py
+
+# Claude Code
+.claude/
 
 # Documentation builds
 docs/_build/
@@ -107,10 +112,8 @@ site/
 logs/
 
 
-# Research papers (keep the reference PDF but ignore working copies)
-# 2601.18642v1.pdf is kept in repo, but ignore other PDFs
+# Research papers
 *.pdf
-!2601.18642v1.pdf
 
 # Specification (keep original)
 
