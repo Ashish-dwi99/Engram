@@ -18,8 +18,9 @@ from engram.core.decay import calculate_decayed_strength, should_forget, should_
 from engram.core.conflict import resolve_conflict
 from engram.core.echo import EchoProcessor, EchoDepth, EchoResult
 from engram.core.fusion import fuse_memories
-from engram.core.retrieval import composite_score
+from engram.core.retrieval import composite_score, tokenize, HybridSearcher
 from engram.core.category import CategoryProcessor, CategoryMatch
+from engram.core.graph import KnowledgeGraph
 from engram.db.sqlite import SQLiteManager
 from engram.exceptions import FadeMemValidationError
 from engram.memory.base import MemoryBase
@@ -117,6 +118,15 @@ class Memory(MemoryBase):
                 self.category_processor.load_categories(existing_categories)
         else:
             self.category_processor = None
+
+        # Initialize Knowledge Graph
+        self.graph_config = self.config.graph
+        if self.graph_config.enable_graph:
+            self.knowledge_graph = KnowledgeGraph(
+                llm=self.llm if self.graph_config.use_llm_extraction else None
+            )
+        else:
+            self.knowledge_graph = None
 
     @classmethod
     def from_config(cls, config_dict: Dict[str, Any]):
@@ -433,6 +443,16 @@ class Memory(MemoryBase):
                         cat_id, effective_strength, is_addition=True
                     )
 
+            # KnowledgeGraph: Extract entities and link memories
+            if self.knowledge_graph:
+                self.knowledge_graph.extract_entities(
+                    content=content,
+                    memory_id=memory_id,
+                    use_llm=self.graph_config.use_llm_extraction,
+                )
+                if self.graph_config.auto_link_entities:
+                    self.knowledge_graph.link_by_shared_entities(memory_id)
+
             results.append(
                 {
                     "id": memory_id,
@@ -467,6 +487,7 @@ class Memory(MemoryBase):
         limit: int = 100,
         rerank: bool = True,
         keyword_search: bool = False,
+        hybrid_alpha: float = 0.7,  # Weight for semantic vs keyword (0.7 = 70% semantic)
         min_strength: float = 0.1,
         boost_on_access: bool = True,
         use_echo_rerank: bool = True,  # EchoMem: use echo metadata for re-ranking
@@ -582,7 +603,24 @@ class Memory(MemoryBase):
 
             similarity = float(vr.score)
             strength = float(memory.get("strength", 1.0))
-            combined = composite_score(similarity, strength)
+
+            # Hybrid search: combine semantic and keyword scores
+            keyword_score = 0.0
+            if keyword_search:
+                hybrid_searcher = HybridSearcher(alpha=hybrid_alpha)
+                scores = hybrid_searcher.score_memory(
+                    query_terms=query_terms,
+                    semantic_similarity=similarity,
+                    memory_content=memory.get("memory", ""),
+                    echo_keywords=metadata.get("echo_keywords", []),
+                    echo_paraphrases=metadata.get("echo_paraphrases", []),
+                    strength=strength,
+                )
+                combined = scores["composite_score"]
+                keyword_score = scores["keyword_score"]
+            else:
+                combined = composite_score(similarity, strength)
+
             combined *= self._get_scope_weight(scope)
 
             # EchoMem: Apply echo-based re-ranking boost
@@ -602,6 +640,19 @@ class Memory(MemoryBase):
                     # Related category match
                     category_boost = self.category_config.cross_category_boost
                 combined = combined * (1 + category_boost)
+
+            # KnowledgeGraph: Boost for memories sharing entities with query terms
+            graph_boost = 0.0
+            if self.knowledge_graph:
+                memory_entities = self.knowledge_graph.memory_entities.get(memory["id"], set())
+                # Check if any query terms match entity names
+                for entity_name in memory_entities:
+                    if entity_name.lower() in query_lower or any(
+                        term in entity_name.lower() for term in query_terms
+                    ):
+                        graph_boost = self.graph_config.graph_boost_weight
+                        break
+                combined = combined * (1 + graph_boost)
 
             if boost_on_access:
                 self.db.increment_access(memory["id"])
@@ -636,6 +687,7 @@ class Memory(MemoryBase):
                     "created_at": memory.get("created_at"),
                     "updated_at": memory.get("updated_at"),
                     "score": similarity,
+                    "keyword_score": keyword_score,
                     "strength": strength,
                     "layer": memory.get("layer", "sml"),
                     "access_count": memory.get("access_count", 0),
@@ -644,6 +696,7 @@ class Memory(MemoryBase):
                     "scope": scope,
                     "echo_boost": echo_boost,
                     "category_boost": category_boost,
+                    "graph_boost": graph_boost,
                 }
             )
 
@@ -1585,3 +1638,128 @@ class Memory(MemoryBase):
             "category": cat.to_dict(),
             "total": len(memories),
         }
+
+    # =========================================================================
+    # Knowledge Graph Methods
+    # =========================================================================
+
+    def get_related_memories(
+        self,
+        memory_id: str,
+        max_depth: int = 2,
+    ) -> Dict[str, Any]:
+        """
+        Get memories related to a given memory via the knowledge graph.
+
+        Args:
+            memory_id: Starting memory ID
+            max_depth: Maximum graph traversal depth
+
+        Returns:
+            Dict with related memories and relationship paths
+        """
+        if not self.knowledge_graph:
+            return {"results": [], "graph_enabled": False}
+
+        related = self.knowledge_graph.get_related_memories(
+            memory_id=memory_id,
+            max_depth=max_depth,
+        )
+
+        results = []
+        for other_id, depth, path in related:
+            memory = self.db.get_memory(other_id)
+            if memory:
+                results.append({
+                    "id": other_id,
+                    "memory": memory.get("memory", ""),
+                    "depth": depth,
+                    "path": [
+                        {
+                            "type": r.relation_type.value,
+                            "entity": r.entity,
+                            "weight": r.weight,
+                        }
+                        for r in path
+                    ],
+                })
+
+        return {"results": results, "total": len(results)}
+
+    def get_memory_entities(self, memory_id: str) -> Dict[str, Any]:
+        """
+        Get entities extracted from a specific memory.
+
+        Args:
+            memory_id: Memory ID
+
+        Returns:
+            Dict with entity information
+        """
+        if not self.knowledge_graph:
+            return {"entities": [], "graph_enabled": False}
+
+        entity_names = self.knowledge_graph.memory_entities.get(memory_id, set())
+        entities = []
+        for name in entity_names:
+            entity = self.knowledge_graph.entities.get(name)
+            if entity:
+                entities.append(entity.to_dict())
+
+        return {"entities": entities, "total": len(entities)}
+
+    def get_entity_memories(self, entity_name: str) -> Dict[str, Any]:
+        """
+        Get all memories containing a specific entity.
+
+        Args:
+            entity_name: Entity name to search for
+
+        Returns:
+            Dict with memories containing the entity
+        """
+        if not self.knowledge_graph:
+            return {"results": [], "graph_enabled": False}
+
+        memory_ids = self.knowledge_graph.get_entity_memories(entity_name)
+        results = []
+        for memory_id in memory_ids:
+            memory = self.db.get_memory(memory_id)
+            if memory:
+                results.append({
+                    "id": memory_id,
+                    "memory": memory.get("memory", ""),
+                    "strength": memory.get("strength", 1.0),
+                    "layer": memory.get("layer", "sml"),
+                })
+
+        return {"results": results, "entity": entity_name, "total": len(results)}
+
+    def get_memory_graph(self, memory_id: str) -> Dict[str, Any]:
+        """
+        Get graph visualization data centered on a memory.
+
+        Args:
+            memory_id: Center memory ID
+
+        Returns:
+            Dict with nodes and edges for visualization
+        """
+        if not self.knowledge_graph:
+            return {"nodes": [], "edges": [], "graph_enabled": False}
+
+        return self.knowledge_graph.get_memory_graph(memory_id)
+
+    def get_graph_stats(self) -> Dict[str, Any]:
+        """
+        Get knowledge graph statistics.
+
+        Returns:
+            Dict with graph statistics
+        """
+        if not self.knowledge_graph:
+            return {"enabled": False}
+
+        stats = self.knowledge_graph.stats()
+        stats["enabled"] = True
+        return stats

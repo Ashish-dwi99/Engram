@@ -2,13 +2,14 @@
 """Engram CLI - Command line interface for the Engram memory layer.
 
 Usage:
-    engram install          Install MCP server to Claude Code, Codex
+    engram install          Install MCP server to Claude Code, Cursor, Codex
     engram add "content"    Add a memory from command line
     engram search "query"   Search memories
     engram list             List all memories
     engram stats            Show memory statistics
     engram decay            Apply memory decay (forgetting)
     engram export           Export memories to JSON
+    engram import file.json Import memories from JSON (Engram or Mem0 format)
     engram server           Start the REST API server
 """
 
@@ -164,6 +165,87 @@ def cmd_export(args):
         print(json.dumps(export_data, indent=2))
 
 
+def cmd_import(args):
+    """Import memories from JSON file."""
+    from engram import Engram
+
+    input_path = Path(args.input)
+    if not input_path.exists():
+        print(f"Error: File not found: {input_path}", file=sys.stderr)
+        sys.exit(1)
+
+    with open(input_path, "r") as f:
+        data = json.load(f)
+
+    # Detect format and extract memories
+    memories = []
+    source_format = "unknown"
+
+    if "memories" in data:
+        memories = data["memories"]
+        if "version" in data:
+            source_format = "engram"
+        else:
+            source_format = "mem0"  # Mem0 format
+    elif isinstance(data, list):
+        memories = data
+        source_format = "raw"
+
+    if not memories:
+        print("No memories found in input file.")
+        sys.exit(0)
+
+    memory = Engram(in_memory=False)
+    user_id = args.user_id or data.get("user_id", "default")
+
+    imported = 0
+    skipped = 0
+    errors = 0
+
+    for mem in memories:
+        try:
+            # Extract content from various possible fields
+            content = (
+                mem.get("memory")
+                or mem.get("content")
+                or mem.get("text")
+                or mem.get("data")
+            )
+
+            if not content:
+                skipped += 1
+                continue
+
+            # Use original user_id if not overridden
+            mem_user_id = user_id if args.user_id else mem.get("user_id", user_id)
+
+            # Add memory (will be re-embedded and processed)
+            result = memory.add(
+                content=content,
+                user_id=mem_user_id,
+                agent_id=mem.get("agent_id"),
+                categories=mem.get("categories", []),
+                metadata=mem.get("metadata", {}),
+                infer=not args.raw,  # Re-extract facts unless --raw
+            )
+
+            if result.get("results"):
+                imported += len(result["results"])
+            else:
+                imported += 1
+
+        except Exception as e:
+            errors += 1
+            if args.verbose:
+                print(f"Error importing memory: {e}", file=sys.stderr)
+
+    print(f"Import complete ({source_format} format detected):")
+    print(f"  Imported: {imported}")
+    print(f"  Skipped:  {skipped}")
+    if errors:
+        print(f"  Errors:   {errors}")
+
+
 def cmd_server(args):
     """Start the REST API server."""
     from engram.api.server import run
@@ -249,6 +331,13 @@ Examples:
     p_export.add_argument("--user-id", "-u", default="default", help="User ID")
     p_export.add_argument("--output", "-o", help="Output file (stdout if not set)")
 
+    # Import command
+    p_import = subparsers.add_parser("import", help="Import memories from JSON")
+    p_import.add_argument("input", help="Input JSON file")
+    p_import.add_argument("--user-id", "-u", default=None, help="Override user ID for all imports")
+    p_import.add_argument("--raw", action="store_true", help="Import as-is without fact extraction")
+    p_import.add_argument("--verbose", "-v", action="store_true", help="Show detailed errors")
+
     # Categories command
     p_cats = subparsers.add_parser("categories", help="List categories")
     p_cats.add_argument("--json", "-j", action="store_true", help="Output as JSON")
@@ -274,6 +363,7 @@ Examples:
         "stats": cmd_stats,
         "decay": cmd_decay,
         "export": cmd_export,
+        "import": cmd_import,
         "categories": cmd_categories,
         "server": cmd_server,
     }
