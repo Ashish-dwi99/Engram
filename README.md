@@ -11,7 +11,7 @@
 <p align="center">
   <b>Give your agents persistent memory that learns, forgets, and shares knowledge like humans do.</b>
   <br><br>
-  Native MCP integration for <b>Claude Code</b> and <b>OpenAI Codex</b>.<br>
+  Native MCP integration for <b>Claude Code</b>, <b>Cursor</b>, and <b>OpenAI Codex</b>.<br>
   Bio-inspired architecture: memories strengthen with use, fade when irrelevant.<br>
   Multi-agent knowledge sharing with user and agent scoping.
 </p>
@@ -20,7 +20,7 @@
   <a href="#-quick-start">Quick Start</a> •
   <a href="#-why-engram">Why Engram</a> •
   <a href="#-multi-agent-memory">Multi-Agent</a> •
-  <a href="#-claude-code--codex-setup">Claude Code & Codex</a> •
+  <a href="#-claude-code-cursor--codex-setup">Claude Code, Cursor & Codex</a> •
   <a href="#-api-reference">API</a>
 </p>
 
@@ -30,14 +30,16 @@
 
 | Feature | Other Memory Layers | **Engram** |
 |---------|---------------------|------------|
-| Bio-inspired forgetting | No | **Yes** |
-| Multi-modal echo encoding | No | **Yes** |
-| Dynamic category system | Rare | **Yes** |
+| Bio-inspired forgetting | No | **Ebbinghaus decay** |
+| Multi-modal encoding | No | **5 modes (echo)** |
+| Knowledge graph | Sometimes | **Entity linking** |
+| Dynamic categories | Rare | **Auto-discovered** |
+| Category decay | No | **Bio-inspired** |
+| Hybrid search | Vector only | **Semantic + Keyword** |
 | Storage efficiency | Store everything | **~45% less** |
-| Multi-agent scoping | Sometimes | **Yes** |
-| MCP Server (Claude/Codex) | Rare | **Yes** |
-| Self-hosted / Local-first | Sometimes | **Yes** |
-| 3-line integration | Sometimes | **Yes** |
+| MCP Server | Rare | **Claude/Cursor/Codex** |
+| Local LLMs (Ollama) | Sometimes | **Yes** |
+| Self-hosted | Cloud-first | **Local-first** |
 
 **Engram is different.** While other memory layers store everything forever, Engram uses bio-inspired mechanisms:
 
@@ -45,6 +47,8 @@
 - **Important memories strengthen** through repeated access and get promoted to long-term storage
 - **Echo encoding** creates multiple retrieval paths (keywords, paraphrases, implications)
 - **Dynamic categories** emerge from content and evolve over time
+- **Knowledge graph** links memories by shared entities for relationship reasoning
+- **Hybrid search** combines semantic similarity with keyword matching
 
 The result: **better retrieval precision, lower storage costs, and memories that actually matter.**
 
@@ -55,10 +59,23 @@ The result: **better retrieval precision, lower storage costs, and memories that
 ### Installation
 
 ```bash
-pip install engram[all]
+# Clone the repository
+git clone https://github.com/Ashish-dwi99/Engram.git
+cd Engram
+
+# Install with all dependencies
+pip install -e ".[all]"
+
+# Set your API key
+export GEMINI_API_KEY="your-key"  # or OPENAI_API_KEY
 ```
 
-### 3-Line Integration
+Or install directly from GitHub:
+```bash
+pip install "engram[all] @ git+https://github.com/Ashish-dwi99/Engram.git"
+```
+
+### Usage
 
 ```python
 from engram import Engram
@@ -66,12 +83,6 @@ from engram import Engram
 memory = Engram()
 memory.add("User prefers Python over JavaScript", user_id="u123")
 results = memory.search("programming preferences", user_id="u123")
-```
-
-### Set Your API Key
-
-```bash
-export GEMINI_API_KEY="your-key"  # or OPENAI_API_KEY
 ```
 
 ---
@@ -141,23 +152,22 @@ stats = memory.stats(user_id="project_x", agent_id="planner")
 
 ---
 
-## Claude Code & Codex Setup
+## Claude Code, Cursor & Codex Setup
 
-Engram provides a native MCP (Model Context Protocol) server for seamless integration with Claude Code and OpenAI Codex.
+Engram provides a native MCP (Model Context Protocol) server for seamless integration with Claude Code, Cursor, and OpenAI Codex.
 
 ### Automatic Installation
 
-```bash
-# Set your API key
-export GEMINI_API_KEY="your-key"  # or OPENAI_API_KEY
+After [installing Engram](#quick-start), run:
 
-# Auto-configure all detected agents
+```bash
 engram-install
 ```
 
 This detects and configures:
 - Claude Code CLI (`~/.claude.json`)
 - Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`)
+- Cursor (`~/.cursor/mcp.json`)
 - OpenAI Codex (`~/.codex/config.toml`)
 
 ### Manual Configuration
@@ -179,6 +189,26 @@ Add to `~/.claude.json` (CLI) or `claude_desktop_config.json` (Desktop):
   }
 }
 ```
+
+#### Cursor
+
+Add to `~/.cursor/mcp.json`:
+
+```json
+{
+  "mcpServers": {
+    "engram-memory": {
+      "command": "python",
+      "args": ["-m", "engram.mcp_server"],
+      "env": {
+        "GEMINI_API_KEY": "your-api-key"
+      }
+    }
+  }
+}
+```
+
+> **Note:** If the file doesn't exist, create it. You can also configure MCP servers through Cursor's Settings UI under the MCP section.
 
 #### OpenAI Codex
 
@@ -393,6 +423,11 @@ Input: "User prefers TypeScript over JavaScript"
 ┌─────────────────────────────────────────────────────────────────┐
 │                          Engram                                  │
 │  ┌───────────────────────────────────────────────────────────┐  │
+│  │                 Knowledge Graph Layer                     │  │
+│  │            (Entity Extraction & Linking)                  │  │
+│  └───────────────────────────────────────────────────────────┘  │
+│                              │                                  │
+│  ┌───────────────────────────────────────────────────────────┐  │
 │  │                   CategoryMem Layer                       │  │
 │  │           (Dynamic Hierarchical Organization)             │  │
 │  └───────────────────────────────────────────────────────────┘  │
@@ -410,7 +445,7 @@ Input: "User prefers TypeScript over JavaScript"
 │  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
 │  │   Embedder   │  │     LLM      │  │    Vector Store      │  │
 │  │   (Gemini/   │  │  (Gemini/    │  │  (Qdrant/In-memory)  │  │
-│  │   OpenAI)    │  │   OpenAI)    │  │                      │  │
+│  │ OpenAI/Ollama│  │ OpenAI/Ollama│  │                      │  │
 │  └──────────────┘  └──────────────┘  └──────────────────────┘  │
 └─────────────────────────────────────────────────────────────────┘
 ```
@@ -425,10 +460,11 @@ Input: "User prefers TypeScript over JavaScript"
 from engram import Engram
 
 memory = Engram(
-    provider="gemini",      # or "openai", auto-detected from env
+    provider="gemini",      # or "openai", "ollama" - auto-detected from env
     in_memory=False,        # True for testing
     enable_echo=True,       # Multi-modal encoding
-    enable_categories=True  # Dynamic categorization
+    enable_categories=True, # Dynamic categorization
+    enable_graph=True       # Knowledge graph for entity linking
 )
 
 # Add memory
@@ -470,9 +506,18 @@ memory.history(memory_id)
 memory.promote(memory_id)  # SML → LML
 memory.demote(memory_id)   # LML → SML
 memory.fuse(memory_ids)    # Combine related memories
+
+# Category methods
 memory.get_category_tree()
 memory.get_all_summaries()
 memory.search_by_category(category_id)
+
+# Knowledge graph methods
+memory.get_related_memories(memory_id)   # Graph traversal
+memory.get_memory_entities(memory_id)    # Extracted entities
+memory.get_entity_memories(entity_name)  # Memories with entity
+memory.get_memory_graph(memory_id)       # Visualization data
+memory.get_graph_stats()                 # Graph statistics
 ```
 
 ### Async Support
@@ -493,8 +538,9 @@ async with AsyncMemory() as memory:
 
 ```bash
 # LLM & Embeddings (choose one)
-export GEMINI_API_KEY="your-key"
-export OPENAI_API_KEY="your-key"
+export GEMINI_API_KEY="your-key"    # Gemini (default)
+export OPENAI_API_KEY="your-key"    # OpenAI
+export OLLAMA_HOST="http://localhost:11434"  # Ollama (local, no key needed)
 
 # Optional: Vector store
 export QDRANT_HOST="localhost"
@@ -545,7 +591,7 @@ config = MemoryConfig(
 ## CLI
 
 ```bash
-# Install MCP server for Claude/Codex
+# Install MCP server for Claude/Cursor/Codex
 engram-install
 
 # Start REST API server
@@ -562,6 +608,7 @@ engram stats --user u123
 engram decay --user u123
 engram categories --user u123
 engram export --user u123 --output memories.json
+engram import memories.json --user u123  # Import from Engram/Mem0 format
 ```
 
 ---
@@ -595,10 +642,10 @@ Engram is based on the paper:
 ## Contributing
 
 ```bash
-git clone https://github.com/engram-ai/engram.git
-cd engram
+git clone https://github.com/Ashish-dwi99/Engram.git
+cd Engram
 pip install -e ".[dev]"
-pytest tests/
+pytest
 ```
 
 ---
@@ -614,6 +661,6 @@ MIT License - see [LICENSE](LICENSE) for details.
 </p>
 
 <p align="center">
-  <a href="https://github.com/engram-ai/engram">GitHub</a> •
-  <a href="https://github.com/engram-ai/engram/issues">Issues</a>
+  <a href="https://github.com/Ashish-dwi99/Engram">GitHub</a> •
+  <a href="https://github.com/Ashish-dwi99/Engram/issues">Issues</a>
 </p>

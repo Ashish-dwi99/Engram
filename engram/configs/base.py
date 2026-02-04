@@ -35,6 +35,15 @@ class GraphStoreConfig(BaseModel):
     config: Optional[Dict[str, Any]] = Field(default=None)
 
 
+class KnowledgeGraphConfig(BaseModel):
+    """Configuration for knowledge graph entity extraction and linking."""
+    enable_graph: bool = True  # Enable knowledge graph
+    use_llm_extraction: bool = False  # Use LLM for entity extraction (slower but more accurate)
+    auto_link_entities: bool = True  # Automatically link memories by shared entities
+    max_traversal_depth: int = 2  # Maximum depth for graph traversal in search
+    graph_boost_weight: float = 0.1  # Boost for graph-related memories in search
+
+
 class EchoMemConfig(BaseModel):
     """Configuration for EchoMem multi-modal encoding."""
     enable_echo: bool = True
@@ -127,3 +136,4 @@ class MemoryConfig(BaseModel):
     echo: EchoMemConfig = Field(default_factory=EchoMemConfig)
     category: CategoryMemConfig = Field(default_factory=CategoryMemConfig)
     scope: ScopeConfig = Field(default_factory=ScopeConfig)
+    graph: KnowledgeGraphConfig = Field(default_factory=lambda: KnowledgeGraphConfig())

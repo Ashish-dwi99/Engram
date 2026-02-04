@@ -15,6 +15,10 @@ class EmbedderFactory:
             from engram.embeddings.openai import OpenAIEmbedder
 
             return OpenAIEmbedder(config)
+        if provider == "ollama":
+            from engram.embeddings.ollama import OllamaEmbedder
+
+            return OllamaEmbedder(config)
         raise ValueError(f"Unsupported embedder provider: {provider}")
 
 
@@ -33,6 +37,10 @@ class LLMFactory:
             from engram.llms.openai import OpenAILLM
 
             return OpenAILLM(config)
+        if provider == "ollama":
+            from engram.llms.ollama import OllamaLLM
+
+            return OllamaLLM(config)
         raise ValueError(f"Unsupported LLM provider: {provider}")
 
 

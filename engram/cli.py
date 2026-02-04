@@ -1,7 +1,7 @@
 """Engram CLI tools for installation and configuration.
 
 Commands:
-    engram-install: Install Engram MCP server into Claude Code, Claude Desktop, and Codex
+    engram-install: Install Engram MCP server into Claude Code, Claude Desktop, Cursor, and Codex
 """
 
 import json
@@ -113,7 +113,7 @@ def _write_toml_section(f, data: Dict[str, Any], path: list) -> None:
 
 def install():
     """
-    Install Engram MCP server into Claude Code, Claude Desktop, and Codex configurations.
+    Install Engram MCP server into Claude Code, Claude Desktop, Cursor, and Codex configurations.
     """
     print("🧠 Engram Memory Layer - MCP Installer")
     print("=======================================")
@@ -144,7 +144,7 @@ def install():
         print("ℹ️  No API keys found in current environment. You may need to add them manually to the config files later.")
 
     # 2. Target Configuration Files
-    # JSON-based configs (Claude Code, Claude Desktop)
+    # JSON-based configs (Claude Code, Claude Desktop, Cursor)
     json_targets = [
         {
             "name": "Claude Code (CLI)",
@@ -153,6 +153,10 @@ def install():
         {
             "name": "Claude Desktop (macOS)",
             "path": Path.home() / "Library/Application Support/Claude/claude_desktop_config.json"
+        },
+        {
+            "name": "Cursor",
+            "path": Path.home() / ".cursor" / "mcp.json"
         },
     ]
 
@@ -181,24 +185,31 @@ def install():
         print("Engram is now configured for:")
         print("  • Claude Code (claude CLI)")
         print("  • Claude Desktop")
+        print("  • Cursor")
         print("  • OpenAI Codex CLI")
         print("\nPlease restart your agent/IDE to load the new MCP server.")
         print("To verify, ask your agent: 'What memory tools do you have?'")
     else:
         print("\n⚠️  No configuration files were updated.")
-        print("Make sure you have Claude Code, Claude Desktop, or Codex installed.")
+        print("Make sure you have Claude Code, Claude Desktop, Cursor, or Codex installed.")
 
 def _update_config(name: str, path: Path, server_name: str, server_config: Dict[str, Any]) -> bool:
     """
     Update a specific configuration file with the MCP server details.
     Returns True if an update happened or was already correct.
     """
-    # Check if parent directory exists (application installed?)
+    # Check if parent directory exists
     if not path.parent.exists():
-        # Only verbose this if it's expected (e.g. basic hidden files might not have dirs?)
-        # For Library/Application Support, lack of dir usually means app not installed.
-        # For .claude.json, it sits in home.
-        return False
+        # For paths in home directory (like ~/.cursor), create the directory
+        # For paths in Application Support, lack of dir means app not installed
+        if path.parent.parent == Path.home():
+            try:
+                path.parent.mkdir(parents=True, exist_ok=True)
+            except Exception as e:
+                print(f"  ❌ Could not create {path.parent}: {e}")
+                return False
+        else:
+            return False
 
     print(f"\nChecking {name} config...")
     

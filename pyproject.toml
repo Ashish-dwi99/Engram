@@ -31,6 +31,7 @@ dependencies = [
 [project.optional-dependencies]
 gemini = ["google-generativeai>=0.3.0"]
 openai = ["openai>=1.0.0"]
+ollama = ["ollama>=0.4.0"]
 qdrant = ["qdrant-client>=1.7.0"]
 mcp = [
     "mcp>=1.0.0",
@@ -42,6 +43,7 @@ api = [
 all = [
     "google-generativeai>=0.3.0",
     "openai>=1.0.0",
+    "ollama>=0.4.0",
     "qdrant-client>=1.7.0",
     "requests>=2.28.0",
     "mcp>=1.0.0",
@@ -56,6 +58,8 @@ dev = [
     "pytest>=7.0.0",
     "pytest-asyncio>=0.21.0",
     "aiosqlite>=0.19.0",
+    "build>=1.0.0",
+    "twine>=5.0.0",
 ]
 
 [project.scripts]
@@ -65,7 +69,9 @@ engram-install = "engram.cli:install"
 engram-api = "engram.api.server:run"
 
 [project.urls]
-Homepage = "https://github.com/engram/engram"
+Homepage = "https://github.com/Ashish-dwi99/Engram"
+Repository = "https://github.com/Ashish-dwi99/Engram"
+Issues = "https://github.com/Ashish-dwi99/Engram/issues"
 
 [tool.setuptools.packages.find]
 where = ["."]
