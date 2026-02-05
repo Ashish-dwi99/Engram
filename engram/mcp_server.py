@@ -169,7 +169,7 @@ async def list_tools() -> List[Tool]:
     return [
         Tool(
             name="add_memory",
-            description="Add a new memory to engram. Use this to remember important facts, preferences, or context about the user or conversation.",
+            description="Add a new memory to engram with full control over categories, scope, and metadata. For simple saves without those extras, prefer the `remember` tool instead. Use `add_memory` when you need categories, scope, agent_id, or other advanced options.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -212,7 +212,7 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="search_memory",
-            description="Search engram for relevant memories. Use this to recall information about the user, previous conversations, or stored context.",
+            description="Search engram for relevant memories by semantic query. The UserPromptSubmit hook handles background search automatically — call this tool only for explicit user recall requests such as 'what did we discuss about X?' or 'recall my preference for Y'.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -257,7 +257,7 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="get_all_memories",
-            description="Get all stored memories for a user. Useful for reviewing what's been remembered.",
+            description="Get all stored memories for a user — use for inventory, audit, or when the user wants a full listing. Not for finding specific information; use search_memory for that.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -283,7 +283,7 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="get_memory",
-            description="Get a specific memory by its ID.",
+            description="Retrieve a single memory by its ID. Use this only when you already have a memory_id from a prior search or listing. Do not use for discovery — use search_memory instead.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -297,7 +297,7 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="update_memory",
-            description="Update an existing memory's content.",
+            description="Update an existing memory's content in place. Use when the user corrects or refines something already stored — update rather than duplicating. Requires the memory_id (search first if you don't have it).",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -315,7 +315,7 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="delete_memory",
-            description="Delete a specific memory by its ID.",
+            description="Permanently delete a memory by its ID. Only call when the user explicitly asks to forget something. If you don't have the ID, search first and confirm with the user before deleting.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -329,7 +329,7 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="get_memory_stats",
-            description="Get statistics about stored memories including counts and layer distribution.",
+            description="Get statistics about the memory store including counts and layer distribution. Call when the user asks about memory health, wants an overview of what's stored, or runs /engram:status.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -346,7 +346,7 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="apply_memory_decay",
-            description="Apply memory decay algorithm to reduce strength of old, unused memories. This simulates natural forgetting.",
+            description="Apply the memory-decay algorithm to reduce strength of old, unused memories (simulates natural forgetting). Explicit maintenance only — do not call this automatically on every turn.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -359,6 +359,42 @@ async def list_tools() -> List[Tool]:
                         "description": "Agent identifier to apply decay for (optional)"
                     }
                 }
+            }
+        ),
+        Tool(
+            name="engram_context",
+            description="Session-start digest. Call once at the beginning of a new conversation to load context from prior sessions. Returns top memories sorted by strength with long-term memories (LML) first.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "string",
+                        "description": "User identifier to load context for (default: 'default')"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of memories to return in the digest (default: 15)"
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="remember",
+            description="Quick-save a fact or preference. Stores your text directly with source_app='claude-code' and infer=False (no LLM extraction). For more control over categories, scope, or metadata, use add_memory instead.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "content": {
+                        "type": "string",
+                        "description": "The fact or preference to remember"
+                    },
+                    "categories": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional categories to tag this memory with (e.g., ['preferences', 'coding'])"
+                    }
+                },
+                "required": ["content"]
             }
         ),
     ]
@@ -489,6 +525,40 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             agent_id = arguments.get("agent_id")
             scope = {"user_id": user_id, "agent_id": agent_id} if user_id or agent_id else None
             result = memory.apply_decay(scope=scope)
+
+        elif name == "engram_context":
+            user_id = arguments.get("user_id", "default")
+            limit = arguments.get("limit", 15)
+            all_result = memory.get_all(user_id=user_id, limit=limit * 3)
+            all_memories = all_result.get("results", [])
+            # Sort: LML first, then by strength descending
+            layer_order = {"lml": 0, "sml": 1}
+            all_memories.sort(key=lambda m: (
+                layer_order.get(m.get("layer", "sml"), 1),
+                -float(m.get("strength", 1.0))
+            ))
+            digest = [
+                {
+                    "id": m["id"],
+                    "memory": m.get("memory", ""),
+                    "layer": m.get("layer", "sml"),
+                    "strength": round(float(m.get("strength", 1.0)), 3),
+                    "categories": m.get("categories", []),
+                }
+                for m in all_memories[:limit]
+            ]
+            result = {"digest": digest, "total_in_store": len(all_memories), "returned": len(digest)}
+
+        elif name == "remember":
+            content = arguments.get("content", "")
+            categories = arguments.get("categories")
+            result = memory.add(
+                messages=content,
+                user_id="default",
+                categories=categories,
+                source_app="claude-code",
+                infer=False,
+            )
 
         else:
             result = {"error": f"Unknown tool: {name}"}

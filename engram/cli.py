@@ -180,6 +180,18 @@ def install():
         if _update_codex_config(target["name"], target["path"], "engram-memory", mcp_config):
             installed_count += 1
 
+    # Install OpenClaw skill
+    print("\nChecking OpenClaw...")
+    from engram.integrations.openclaw import deploy as _deploy_openclaw
+    if _deploy_openclaw():
+        installed_count += 1
+
+    # Install Claude Code plugin
+    print("\nDeploying Claude Code plugin...")
+    from engram.integrations.claude_code_plugin import deploy as _deploy_cc_plugin
+    if _deploy_cc_plugin():
+        installed_count += 1
+
     if installed_count > 0:
         print("\n✨ Installation successful!")
         print("Engram is now configured for:")
@@ -187,6 +199,8 @@ def install():
         print("  • Claude Desktop")
         print("  • Cursor")
         print("  • OpenAI Codex CLI")
+        print("  • OpenClaw")
+        print("  • Claude Code plugin (hooks + /engram commands + skill)")
         print("\nPlease restart your agent/IDE to load the new MCP server.")
         print("To verify, ask your agent: 'What memory tools do you have?'")
     else:

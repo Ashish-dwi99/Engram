@@ -169,6 +169,7 @@ This detects and configures:
 - Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`)
 - Cursor (`~/.cursor/mcp.json`)
 - OpenAI Codex (`~/.codex/config.toml`)
+- Claude Code plugin (proactive hook + `/engram` commands + skill)
 
 ### Manual Configuration
 
@@ -223,6 +224,44 @@ args = ["-m", "engram.mcp_server"]
 GEMINI_API_KEY = "your-api-key"
 ```
 
+### Claude Code Plugin (Proactive Memory)
+
+The MCP tools above let Claude *react* to your requests. The **Claude Code plugin** makes memory *proactive* — relevant context is injected automatically before Claude even sees your message.
+
+`engram-install` deploys the plugin to `~/.engram/claude-plugin/engram-memory/`. To activate it inside Claude Code, run:
+
+```
+/plugin install engram-memory --path ~/.engram/claude-plugin
+```
+
+> **Requires a running Engram API** (`engram-api`) for the hook to fetch memories. If the API is down the hook exits silently — nothing breaks, you just don't get the auto-injection.
+
+#### What the plugin adds
+
+| Piece | What it does |
+|---|---|
+| **UserPromptSubmit hook** | Before each reply, queries Engram and injects matching memories into Claude's context. Stdlib-only script, no extra deps. |
+| `/engram:remember <text>` | Save a fact or preference on the spot |
+| `/engram:search <query>` | Search memories by topic |
+| `/engram:forget <id or query>` | Delete a memory (confirms before removing) |
+| `/engram:status` | Show memory-store stats at a glance |
+| **Skill (standing instructions)** | Tells Claude when to save, when to search, and how to surface injected context naturally |
+
+#### How the hook works
+
+```
+User types a message
+  → hook reads it, extracts a short query (no LLM, pure string ops)
+  → GET /health  (3 s timeout — fast-fail if API is down)
+  → POST /v1/search  (6 s timeout)
+  → matching memories injected as a system message
+  → Claude replies with that context already loaded
+```
+
+Total added latency is typically under 2 seconds, well within the 8-second hook timeout. On any failure the hook outputs `{}` and Claude proceeds normally.
+
+---
+
 ### Available MCP Tools
 
 Once configured, your agent has access to these tools:
@@ -237,23 +276,34 @@ Once configured, your agent has access to these tools:
 | `delete_memory` | Remove a memory | Remove sensitive or incorrect data |
 | `get_memory_stats` | Get storage statistics | Monitor memory health |
 | `apply_memory_decay` | Run forgetting algorithm | Periodic cleanup of stale memories |
+| `engram_context` | Load session digest from prior sessions | Call once at conversation start; returns top memories, LML first |
+| `remember` | Quick-save a fact or preference | Stores directly with `source_app=claude-code`, no LLM extraction |
 
 ### Example: Claude Code with Memory
 
-After setup, Claude Code automatically uses Engram for persistent memory:
+**Without the plugin** — Claude reacts to explicit requests via MCP tools:
 
 ```
 You: Remember that I prefer using TypeScript for all new projects
 
 Claude: I'll remember that preference for you.
-[Calls add_memory tool]
+[Calls remember tool → stored with source_app=claude-code]
+```
 
---- Next session ---
+**With the plugin** — memory is proactive and invisible:
 
+```
+--- Session A ---
+You: /engram:remember I prefer TypeScript for all new projects
+Claude: Saved to memory.
+
+--- Session B (new conversation, no history) ---
 You: What stack should I use for the new API?
 
+[Hook runs silently: queries Engram, injects "TypeScript preference" into context]
+
 Claude: Based on your preferences, I'd recommend TypeScript...
-[Calls search_memory tool, finds TypeScript preference]
+        (no search_memory call needed — context was already there)
 ```
 
 ### Example: Multi-Agent Codex Workflow
