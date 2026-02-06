@@ -164,7 +164,7 @@ Engram provides a native MCP (Model Context Protocol) server for seamless integr
 
 ### Step-by-Step Setup
 
-**1. Install Engram** (in your terminal, not Claude Code):
+**1. Install Engram**:
 
 ```bash
 git clone https://github.com/Ashish-dwi99/Engram.git
@@ -199,9 +199,8 @@ engram-install
 **What it does NOT do:**
 - ✗ Does not start the Engram API (you need to run `engram-api` separately)
 - ✗ Does not activate the Claude Code plugin (requires `/plugin install` command)
-- ✗ Does not restart Claude Code (you need to restart manually)
 
-**4. Restart Claude Code** so it loads the new MCP config.
+**4. Restart Claude Code/Codex/Cursor** so it loads the new MCP config.
 
 **5. Start the Engram API** (in a separate terminal, leave it running):
 
@@ -252,10 +251,6 @@ If you only want the MCP tools (no proactive hook), stop after step 4. Steps 5-6
 - If missing, run `engram-install` again
 - Make sure you're using the full path: `/plugin install engram-memory --path ~/.engram/claude-plugin`
 
-**"API won't start (port already in use)"**
-- Check if another instance is running: `lsof -i :8100`
-- Kill it: `kill <PID>` then restart `engram-api`
-- Or use a different port: `ENGRAM_API_PORT=8200 engram-api`
 
 ---
 
