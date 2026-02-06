@@ -1,0 +1,7 @@
+{
+  "name": "engram-memory",
+  "version": "1.0.0",
+  "description": "Proactive persistent memory for Claude Code powered by Engram",
+  "author": "Engram",
+  "provider": "engram"
+}

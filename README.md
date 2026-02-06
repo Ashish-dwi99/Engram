@@ -77,6 +77,8 @@ pip install "engram[all] @ git+https://github.com/Ashish-dwi99/Engram.git"
 
 ### Usage
 
+**Python SDK:**
+
 ```python
 from engram import Engram
 
@@ -84,6 +86,10 @@ memory = Engram()
 memory.add("User prefers Python over JavaScript", user_id="u123")
 results = memory.search("programming preferences", user_id="u123")
 ```
+
+**Claude Code / Cursor / Codex Integration:**
+
+For the full setup with MCP tools, proactive hooks, and slash commands, see [Claude Code, Cursor & Codex Setup](#claude-code-cursor--codex-setup) below.
 
 ---
 
@@ -156,20 +162,102 @@ stats = memory.stats(user_id="project_x", agent_id="planner")
 
 Engram provides a native MCP (Model Context Protocol) server for seamless integration with Claude Code, Cursor, and OpenAI Codex.
 
-### Automatic Installation
+### Step-by-Step Setup
 
-After [installing Engram](#quick-start), run:
+**1. Install Engram** (in your terminal, not Claude Code):
+
+```bash
+git clone https://github.com/Ashish-dwi99/Engram.git
+cd Engram
+python3 -m venv .venv
+source .venv/bin/activate  # Windows: .venv\Scripts\activate
+pip install -e ".[all]"
+```
+
+**2. Set your API key** (pick one):
+
+```bash
+export GEMINI_API_KEY="your-key-here"
+# OR
+export OPENAI_API_KEY="your-key-here"
+```
+
+**3. Run the installer** (still in your terminal):
 
 ```bash
 engram-install
 ```
 
-This detects and configures:
-- Claude Code CLI (`~/.claude.json`)
-- Claude Desktop (`~/Library/Application Support/Claude/claude_desktop_config.json`)
-- Cursor (`~/.cursor/mcp.json`)
-- OpenAI Codex (`~/.codex/config.toml`)
-- Claude Code plugin (proactive hook + `/engram` commands + skill)
+**What this does automatically:**
+- ✓ Writes MCP server config to `~/.claude.json` (Claude Code)
+- ✓ Writes MCP server config to `~/Library/Application Support/Claude/claude_desktop_config.json` (Claude Desktop)
+- ✓ Writes MCP server config to `~/.cursor/mcp.json` (Cursor)
+- ✓ Writes MCP server config to `~/.codex/config.toml` (Codex)
+- ✓ Deploys plugin files to `~/.engram/claude-plugin/engram-memory/`
+- ✓ Forwards your API keys to all configs
+
+**What it does NOT do:**
+- ✗ Does not start the Engram API (you need to run `engram-api` separately)
+- ✗ Does not activate the Claude Code plugin (requires `/plugin install` command)
+- ✗ Does not restart Claude Code (you need to restart manually)
+
+**4. Restart Claude Code** so it loads the new MCP config.
+
+**5. Start the Engram API** (in a separate terminal, leave it running):
+
+```bash
+engram-api
+# Runs on http://127.0.0.1:8100
+```
+
+> **Note:** The API is required for the proactive hook to work. If the API is down, the hook exits silently and Claude Code continues normally (just without auto-injected context).
+
+**6. Activate the plugin** (inside Claude Code):
+
+```
+/plugin install engram-memory --path ~/.engram/claude-plugin
+```
+
+**Done!** The 10 MCP tools are now available, the proactive hook is active, and you can use `/engram:remember`, `/engram:search`, etc.
+
+---
+
+### What You Get After Setup
+
+| Feature | Available After Step |
+|---|---|
+| 10 MCP tools (`add_memory`, `search_memory`, etc.) | Step 4 (restart Claude Code) |
+| Proactive memory injection (hook) | Step 6 (plugin activated) + API running |
+| `/engram:*` slash commands | Step 6 (plugin activated) |
+| Skill (standing instructions) | Step 6 (plugin activated) |
+
+If you only want the MCP tools (no proactive hook), stop after step 4. Steps 5-6 are only for the plugin features.
+
+---
+
+### Troubleshooting
+
+**"Claude Code doesn't see the memory tools"**
+- Restart Claude Code after running `engram-install`
+- Check that `~/.claude.json` exists and has an `mcpServers.engram-memory` section
+- Verify your API key is set: `echo $GEMINI_API_KEY`
+
+**"The hook isn't injecting memories"**
+- Check that `engram-api` is running: `curl http://127.0.0.1:8100/health`
+- Verify the plugin is activated: in Claude Code, run `/plugin` and check that `engram-memory` appears in the list
+- Check the hook script is executable: `ls -l ~/.engram/claude-plugin/engram-memory/hooks/prompt_context.py` (should show `x` permission)
+
+**"Plugin activation failed"**
+- Verify plugin files exist: `ls ~/.engram/claude-plugin/engram-memory/`
+- If missing, run `engram-install` again
+- Make sure you're using the full path: `/plugin install engram-memory --path ~/.engram/claude-plugin`
+
+**"API won't start (port already in use)"**
+- Check if another instance is running: `lsof -i :8100`
+- Kill it: `kill <PID>` then restart `engram-api`
+- Or use a different port: `ENGRAM_API_PORT=8200 engram-api`
+
+---
 
 ### Manual Configuration
 
