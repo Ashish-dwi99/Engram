@@ -8,11 +8,6 @@
   <b>Memory layer for AI agents with biologically-inspired forgetting.</b>
 </p>
 
-<p align="center">
-  <a href="https://github.com/Ashish-dwi99/Engram/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
-  <a href="https://github.com/Ashish-dwi99/Engram/actions"><img src="https://github.com/Ashish-dwi99/Engram/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
-  <img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+">
-</p>
 
 <p align="center">
   <a href="#quick-start">Quick Start</a> &middot;
