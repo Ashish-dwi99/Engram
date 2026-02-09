@@ -169,7 +169,7 @@ async def list_tools() -> List[Tool]:
     return [
         Tool(
             name="add_memory",
-            description="Add a new memory to engram with full control over categories, scope, and metadata. For simple saves without those extras, prefer the `remember` tool instead. Use `add_memory` when you need categories, scope, agent_id, or other advanced options.",
+            description="Create a write proposal in staging by default. Supports direct writes only when mode='direct' in trusted local contexts. For simple saves without extras, prefer `remember`.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -204,7 +204,20 @@ async def list_tools() -> List[Tool]:
                     },
                     "scope": {
                         "type": "string",
-                        "description": "Memory scope: agent|connector|category|global"
+                        "description": "Confidentiality scope: work|personal|finance|health|private"
+                    },
+                    "namespace": {
+                        "type": "string",
+                        "description": "Namespace for scoped memory segmentation (default: 'default')."
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["staging", "direct"],
+                        "description": "Write mode. Default staging."
+                    },
+                    "source_event_id": {
+                        "type": "string",
+                        "description": "Optional source event ID for provenance."
                     }
                 },
                 "required": ["content"]
@@ -380,7 +393,7 @@ async def list_tools() -> List[Tool]:
         ),
         Tool(
             name="remember",
-            description="Quick-save a fact or preference. Stores your text directly with source_app='claude-code' and infer=False (no LLM extraction). For more control over categories, scope, or metadata, use add_memory instead.",
+            description="Quick-save to staging. Creates a proposal commit with source_app='claude-code' and infer=False by default.",
             inputSchema={
                 "type": "object",
                 "properties": {
@@ -397,6 +410,172 @@ async def list_tools() -> List[Tool]:
                 "required": ["content"]
             }
         ),
+        Tool(
+            name="propose_write",
+            description="Create a staging proposal commit for a memory write. Preferred v2 write path for agents.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "content": {"type": "string"},
+                    "user_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "categories": {"type": "array", "items": {"type": "string"}},
+                    "metadata": {"type": "object"},
+                    "scope": {
+                        "type": "string",
+                        "description": "Confidentiality scope: work|personal|finance|health|private"
+                    },
+                    "namespace": {
+                        "type": "string",
+                        "description": "Namespace for scoped memory segmentation (default: 'default')."
+                    },
+                    "mode": {
+                        "type": "string",
+                        "enum": ["staging", "direct"],
+                        "description": "Direct mode reserved for trusted local clients."
+                    },
+                },
+                "required": ["content"],
+            },
+        ),
+        Tool(
+            name="list_pending_commits",
+            description="List staging commits and their statuses.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "status": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+            },
+        ),
+        Tool(
+            name="resolve_conflict",
+            description="Resolve a conflict stash entry.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "stash_id": {"type": "string"},
+                    "user_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "resolution": {
+                        "type": "string",
+                        "enum": ["UNRESOLVED", "KEEP_EXISTING", "ACCEPT_PROPOSED", "KEEP_BOTH"],
+                    },
+                },
+                "required": ["stash_id", "resolution"],
+            },
+        ),
+        Tool(
+            name="declare_namespace",
+            description="Declare a namespace for scoped memory access.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "namespace": {"type": "string"},
+                    "description": {"type": "string"},
+                },
+                "required": ["namespace"],
+            },
+        ),
+        Tool(
+            name="grant_namespace_permission",
+            description="Grant an agent capability on a namespace.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "namespace": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "requester_agent_id": {"type": "string"},
+                    "capability": {"type": "string"},
+                    "expires_at": {"type": "string"},
+                },
+                "required": ["namespace", "agent_id"],
+            },
+        ),
+        Tool(
+            name="upsert_agent_policy",
+            description="Create or update an agent policy used to clamp capability sessions.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "requester_agent_id": {"type": "string"},
+                    "allowed_confidentiality_scopes": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "allowed_capabilities": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                    "allowed_namespaces": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                    },
+                },
+                "required": ["agent_id"],
+            },
+        ),
+        Tool(
+            name="list_agent_policies",
+            description="List policies for a user, or fetch one policy when agent_id is provided.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "requester_agent_id": {"type": "string"},
+                    "include_wildcard": {"type": "boolean"},
+                },
+            },
+        ),
+        Tool(
+            name="delete_agent_policy",
+            description="Delete one policy for a user and agent.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "requester_agent_id": {"type": "string"},
+                },
+                "required": ["agent_id"],
+            },
+        ),
+        Tool(
+            name="get_agent_trust",
+            description="Get trust score stats for an agent.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "requester_agent_id": {"type": "string"},
+                },
+                "required": ["agent_id"],
+            },
+        ),
+        Tool(
+            name="run_sleep_cycle",
+            description="Run the maintenance sleep cycle once (digest + promotion + decay + ref GC).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "agent_id": {"type": "string"},
+                    "date": {"type": "string"},
+                    "apply_decay": {"type": "boolean"},
+                    "cleanup_stale_refs": {"type": "boolean"},
+                },
+            },
+        ),
         # ---- Episodic Scene tools ----
         Tool(
             name="get_scene",
@@ -407,7 +586,15 @@ async def list_tools() -> List[Tool]:
                     "scene_id": {
                         "type": "string",
                         "description": "The ID of the scene to retrieve"
-                    }
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": "User identifier (default: 'default')",
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Agent identifier for scoped scene reads (optional)",
+                    },
                 },
                 "required": ["scene_id"]
             }
@@ -454,6 +641,10 @@ async def list_tools() -> List[Tool]:
                     "user_id": {
                         "type": "string",
                         "description": "User identifier (default: 'default')"
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Agent identifier for scoped scene search (optional)",
                     },
                     "limit": {
                         "type": "integer",
@@ -523,26 +714,54 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         memory = get_memory()
         result: Any = None
 
-        if name == "add_memory":
+        def _session_token(
+            *,
+            user_id: str,
+            agent_id: Optional[str],
+            capabilities: List[str],
+            namespaces: Optional[List[str]] = None,
+        ) -> str:
+            session = memory.create_session(
+                user_id=user_id,
+                agent_id=agent_id,
+                allowed_confidentiality_scopes=["work", "personal", "finance", "health", "private"],
+                capabilities=capabilities,
+                namespaces=namespaces,
+                ttl_minutes=24 * 60,
+            )
+            return session["token"]
+
+        if name in {"add_memory", "propose_write"}:
             content = arguments.get("content", "")
             user_id = arguments.get("user_id", "default")
             agent_id = arguments.get("agent_id")
             categories = arguments.get("categories")
             metadata = arguments.get("metadata")
-            agent_category = arguments.get("agent_category")
-            connector_id = arguments.get("connector_id")
-            scope = arguments.get("scope")
+            scope = arguments.get("scope", "work")
+            namespace = arguments.get("namespace", "default")
+            mode = arguments.get("mode", "staging")
+            source_event_id = arguments.get("source_event_id")
+            token = _session_token(
+                user_id=user_id,
+                agent_id=agent_id,
+                capabilities=["propose_write"],
+                namespaces=[namespace],
+            )
 
-            result = memory.add(
-                messages=content,
+            result = memory.propose_write(
+                content=content,
                 user_id=user_id,
                 agent_id=agent_id,
                 categories=categories,
                 metadata=metadata,
-                agent_category=agent_category,
-                connector_id=connector_id,
                 scope=scope,
-                infer=False,  # Store the content directly without LLM extraction
+                namespace=namespace,
+                mode=mode,
+                infer=False,
+                token=token,
+                source_app="mcp",
+                source_type="mcp",
+                source_event_id=source_event_id,
             )
 
         elif name == "search_memory":
@@ -554,23 +773,37 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             agent_category = arguments.get("agent_category")
             connector_ids = arguments.get("connector_ids")
             scope_filter = arguments.get("scope_filter")
-
-            result = memory.search(
-                query=query,
-                user_id=user_id,
-                agent_id=agent_id,
-                limit=limit,
-                categories=categories,
-                agent_category=agent_category,
-                connector_ids=connector_ids,
-                scope_filter=scope_filter,
-            )
+            if agent_id:
+                token = _session_token(
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    capabilities=["search"],
+                )
+                result = memory.search_with_context(
+                    query=query,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    token=token,
+                    limit=limit,
+                    categories=categories,
+                )
+            else:
+                result = memory.search(
+                    query=query,
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    limit=limit,
+                    categories=categories,
+                    agent_category=agent_category,
+                    connector_ids=connector_ids,
+                    scope_filter=scope_filter,
+                )
             # Simplify results for readability
             if "results" in result:
                 result["results"] = [
                     {
-                        "id": r["id"],
-                        "memory": r["memory"],
+                        "id": r.get("id"),
+                        "memory": r.get("memory", r.get("details", "")),
                         "score": round(r.get("composite_score", r.get("score", 0)), 3),
                         "layer": r.get("layer", "sml"),
                         "categories": r.get("categories", []),
@@ -668,20 +901,199 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         elif name == "remember":
             content = arguments.get("content", "")
             categories = arguments.get("categories")
-            result = memory.add(
-                messages=content,
+            token = _session_token(
                 user_id="default",
+                agent_id="claude-code",
+                capabilities=["propose_write"],
+                namespaces=[arguments.get("namespace", "default")],
+            )
+            result = memory.propose_write(
+                content=content,
+                user_id="default",
+                agent_id="claude-code",
                 categories=categories,
+                scope=arguments.get("scope", "work"),
+                namespace=arguments.get("namespace", "default"),
+                mode=arguments.get("mode", "staging"),
                 source_app="claude-code",
+                source_type="mcp",
                 infer=False,
+                token=token,
+            )
+
+        elif name == "list_pending_commits":
+            user_id = arguments.get("user_id", "default")
+            agent_id = arguments.get("agent_id", "claude-code")
+            token = _session_token(
+                user_id=user_id,
+                agent_id=agent_id,
+                capabilities=["review_commits"],
+            )
+            result = memory.list_pending_commits(
+                user_id=user_id,
+                agent_id=agent_id,
+                token=token,
+                status=arguments.get("status"),
+                limit=arguments.get("limit", 100),
+            )
+
+        elif name == "resolve_conflict":
+            agent_id = arguments.get("agent_id", "claude-code")
+            # Conflict ownership is resolved from stash; session user can stay default.
+            token = _session_token(
+                user_id=arguments.get("user_id", "default"),
+                agent_id=agent_id,
+                capabilities=["resolve_conflicts"],
+            )
+            result = memory.resolve_conflict(
+                stash_id=arguments.get("stash_id", ""),
+                resolution=arguments.get("resolution", "UNRESOLVED"),
+                token=token,
+                agent_id=agent_id,
+            )
+
+        elif name == "declare_namespace":
+            user_id = arguments.get("user_id", "default")
+            caller_agent_id = arguments.get("agent_id", "claude-code")
+            token = _session_token(
+                user_id=user_id,
+                agent_id=caller_agent_id,
+                capabilities=["manage_namespaces"],
+                namespaces=[arguments.get("namespace", "default")],
+            )
+            result = memory.declare_namespace(
+                user_id=user_id,
+                namespace=arguments.get("namespace", "default"),
+                description=arguments.get("description"),
+                token=token,
+                agent_id=caller_agent_id,
+            )
+
+        elif name == "grant_namespace_permission":
+            user_id = arguments.get("user_id", "default")
+            requester_agent_id = arguments.get("requester_agent_id", arguments.get("agent_id", "claude-code"))
+            token = _session_token(
+                user_id=user_id,
+                agent_id=requester_agent_id,
+                capabilities=["manage_namespaces"],
+                namespaces=[arguments.get("namespace", "default")],
+            )
+            result = memory.grant_namespace_permission(
+                user_id=user_id,
+                namespace=arguments.get("namespace", "default"),
+                agent_id=arguments.get("agent_id", "claude-code"),
+                capability=arguments.get("capability", "read"),
+                expires_at=arguments.get("expires_at"),
+                token=token,
+                requester_agent_id=requester_agent_id,
+            )
+
+        elif name == "upsert_agent_policy":
+            user_id = arguments.get("user_id", "default")
+            requester_agent_id = arguments.get("requester_agent_id", arguments.get("agent_id", "claude-code"))
+            token = _session_token(
+                user_id=user_id,
+                agent_id=requester_agent_id,
+                capabilities=["manage_namespaces"],
+            )
+            result = memory.upsert_agent_policy(
+                user_id=user_id,
+                agent_id=arguments.get("agent_id", "claude-code"),
+                allowed_confidentiality_scopes=arguments.get("allowed_confidentiality_scopes"),
+                allowed_capabilities=arguments.get("allowed_capabilities"),
+                allowed_namespaces=arguments.get("allowed_namespaces"),
+                token=token,
+                requester_agent_id=requester_agent_id,
+            )
+
+        elif name == "list_agent_policies":
+            user_id = arguments.get("user_id", "default")
+            requester_agent_id = arguments.get("requester_agent_id", arguments.get("agent_id", "claude-code"))
+            token = _session_token(
+                user_id=user_id,
+                agent_id=requester_agent_id,
+                capabilities=["manage_namespaces"],
+            )
+            lookup_agent_id = arguments.get("agent_id")
+            if lookup_agent_id:
+                result = memory.get_agent_policy(
+                    user_id=user_id,
+                    agent_id=lookup_agent_id,
+                    include_wildcard=arguments.get("include_wildcard", True),
+                    token=token,
+                    requester_agent_id=requester_agent_id,
+                )
+            else:
+                result = memory.list_agent_policies(
+                    user_id=user_id,
+                    token=token,
+                    requester_agent_id=requester_agent_id,
+                )
+
+        elif name == "delete_agent_policy":
+            user_id = arguments.get("user_id", "default")
+            requester_agent_id = arguments.get("requester_agent_id", arguments.get("agent_id", "claude-code"))
+            token = _session_token(
+                user_id=user_id,
+                agent_id=requester_agent_id,
+                capabilities=["manage_namespaces"],
+            )
+            result = memory.delete_agent_policy(
+                user_id=user_id,
+                agent_id=arguments.get("agent_id", "claude-code"),
+                token=token,
+                requester_agent_id=requester_agent_id,
+            )
+
+        elif name == "get_agent_trust":
+            user_id = arguments.get("user_id", "default")
+            requester_agent_id = arguments.get("requester_agent_id", arguments.get("agent_id", "claude-code"))
+            token = _session_token(
+                user_id=user_id,
+                agent_id=requester_agent_id,
+                capabilities=["read_trust"],
+            )
+            result = memory.get_agent_trust(
+                user_id=user_id,
+                agent_id=arguments.get("agent_id", "claude-code"),
+                token=token,
+                requester_agent_id=requester_agent_id,
+            )
+
+        elif name == "run_sleep_cycle":
+            user_id = arguments.get("user_id", "default")
+            caller_agent_id = arguments.get("agent_id", "claude-code")
+            token = _session_token(
+                user_id=user_id,
+                agent_id=caller_agent_id,
+                capabilities=["run_sleep_cycle"],
+            )
+            result = memory.run_sleep_cycle(
+                user_id=arguments.get("user_id"),
+                date_str=arguments.get("date"),
+                apply_decay=arguments.get("apply_decay", True),
+                cleanup_stale_refs=arguments.get("cleanup_stale_refs", True),
+                token=token,
+                agent_id=caller_agent_id,
             )
 
         # ---- Scene tools ----
         elif name == "get_scene":
             scene_id = arguments.get("scene_id", "")
-            scene = memory.get_scene(scene_id)
+            user_id = arguments.get("user_id", "default")
+            agent_id = arguments.get("agent_id", "claude-code")
+            token = _session_token(
+                user_id=user_id,
+                agent_id=agent_id,
+                capabilities=["read_scene"],
+            )
+            scene = memory.kernel.get_scene(
+                scene_id=scene_id,
+                user_id=user_id,
+                agent_id=agent_id,
+                token=token,
+            )
             if scene:
-                scene.pop("embedding", None)
                 result = scene
             else:
                 result = {"error": "Scene not found"}
@@ -714,18 +1126,32 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         elif name == "search_scenes":
             query = arguments.get("query", "")
             user_id = arguments.get("user_id", "default")
+            agent_id = arguments.get("agent_id", "claude-code")
             limit = arguments.get("limit", 10)
-            scenes = memory.search_scenes(query=query, user_id=user_id, limit=limit)
+            token = _session_token(
+                user_id=user_id,
+                agent_id=agent_id,
+                capabilities=["read_scene"],
+            )
+            payload = memory.kernel.search_scenes(
+                query=query,
+                user_id=user_id,
+                agent_id=agent_id,
+                token=token,
+                limit=limit,
+            )
+            scenes = payload.get("scenes", [])
             result = {
                 "scenes": [
                     {
-                        "id": s["id"],
+                        "id": s.get("id"),
                         "title": s.get("title"),
-                        "summary": s.get("summary"),
+                        "summary": s.get("summary", s.get("details")),
                         "topic": s.get("topic"),
-                        "start_time": s.get("start_time"),
+                        "start_time": s.get("start_time", s.get("time")),
                         "search_score": s.get("search_score"),
                         "memory_count": len(s.get("memory_ids", [])),
+                        "masked": bool(s.get("masked", False)),
                     }
                     for s in scenes
                 ],

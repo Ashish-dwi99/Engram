@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import uuid
 from datetime import datetime, date
 from enum import Enum
@@ -23,6 +24,8 @@ from engram.core.category import CategoryProcessor, CategoryMatch
 from engram.core.graph import KnowledgeGraph
 from engram.core.scene import SceneProcessor
 from engram.core.profile import ProfileProcessor
+from engram.core.kernel import PersonalMemoryKernel
+from engram.core.policy import feature_enabled
 from engram.db.sqlite import SQLiteManager
 from engram.exceptions import FadeMemValidationError
 from engram.memory.base import MemoryBase
@@ -34,6 +37,7 @@ from engram.memory.utils import (
     parse_messages,
     strip_code_fences,
 )
+from engram.observability import metrics
 from engram.utils.factory import EmbedderFactory, LLMFactory, VectorStoreFactory
 from engram.utils.prompts import AGENT_MEMORY_EXTRACTION_PROMPT, MEMORY_EXTRACTION_PROMPT
 
@@ -167,6 +171,9 @@ class Memory(MemoryBase):
         else:
             self.profile_processor = None
 
+        # v2 Personal Memory Kernel orchestration layer.
+        self.kernel = PersonalMemoryKernel(self)
+
     @classmethod
     def from_config(cls, config_dict: Dict[str, Any]):
         return cls(MemoryConfig(**config_dict))
@@ -265,7 +272,8 @@ class Memory(MemoryBase):
                 content = explicit_intent.content
 
             blocked = detect_sensitive_categories(content)
-            if blocked:
+            allow_sensitive = bool(mem_metadata.get("allow_sensitive"))
+            if blocked and not allow_sensitive:
                 results.append(
                     {
                         "event": "BLOCKED",
@@ -436,6 +444,20 @@ class Memory(MemoryBase):
             if low_confidence:
                 layer = "sml"
 
+            confidentiality_scope = str(
+                mem_metadata.get("confidentiality_scope")
+                or mem_metadata.get("privacy_scope")
+                or "work"
+            ).lower()
+            source_type = (
+                mem_metadata.get("source_type")
+                or ("cli" if (source_app or "").lower() == "cli" else "mcp")
+            )
+            source_event_id = mem_metadata.get("source_event_id")
+            importance = mem_metadata.get("importance", 0.5)
+            sensitivity = mem_metadata.get("sensitivity", "normal")
+            namespace_value = str(mem_metadata.get("namespace", "default") or "default").strip() or "default"
+
             memory_id = str(uuid.uuid4())
             now = datetime.utcnow().isoformat()
             memory_data = {
@@ -456,6 +478,15 @@ class Memory(MemoryBase):
                 "access_count": 0,
                 "last_accessed": now,
                 "embedding": embedding,
+                "confidentiality_scope": confidentiality_scope,
+                "source_type": source_type,
+                "source_app": source_app or mem_metadata.get("source_app"),
+                "source_event_id": source_event_id,
+                "decay_lambda": self.fadem_config.sml_decay_rate,
+                "status": "active",
+                "importance": importance,
+                "sensitivity": sensitivity,
+                "namespace": namespace_value,
             }
 
             vectors, payloads, vector_ids = self._build_index_vectors(
@@ -515,6 +546,7 @@ class Memory(MemoryBase):
                     "strength": effective_strength,
                     "echo_depth": echo_result.echo_depth.value if echo_result else None,
                     "categories": mem_categories,
+                    "namespace": namespace_value,
                     "vector_nodes": len(vectors) # Info for user
                 }
             )
@@ -723,6 +755,8 @@ class Memory(MemoryBase):
                     and metadata.get("echo_depth") != "deep"
                 ):
                     self._reecho_memory(memory["id"])
+                if agent_id:
+                    self.db.add_memory_subscriber(memory["id"], f"agent:{agent_id}", ref_type="weak")
 
             results.append(
                 {
@@ -747,6 +781,14 @@ class Memory(MemoryBase):
                     "last_accessed": memory.get("last_accessed"),
                     "composite_score": combined,
                     "scope": scope,
+                    "namespace": memory.get("namespace", "default"),
+                    "confidentiality_scope": memory.get("confidentiality_scope", "work"),
+                    "source_type": memory.get("source_type"),
+                    "source_app": memory.get("source_app"),
+                    "source_event_id": memory.get("source_event_id"),
+                    "status": memory.get("status", "active"),
+                    "importance": memory.get("importance", 0.5),
+                    "sensitivity": memory.get("sensitivity", "normal"),
                     "echo_boost": echo_boost,
                     "category_boost": category_boost,
                     "graph_boost": graph_boost,
@@ -986,6 +1028,13 @@ class Memory(MemoryBase):
         if not self.fadem_config.enable_forgetting:
             return {"decayed": 0, "forgotten": 0, "promoted": 0}
 
+        stale_refs_removed = 0
+        if feature_enabled("ENGRAM_V2_REF_GC", default=True):
+            try:
+                stale_refs_removed = int(self.kernel.ref_manager.cleanup_stale_refs())
+            except Exception:
+                stale_refs_removed = 0
+
         memories = self.db.get_all_memories(
             user_id=scope.get("user_id") if scope else None,
             agent_id=scope.get("agent_id") if scope else None,
@@ -1001,6 +1050,15 @@ class Memory(MemoryBase):
             if memory.get("immutable"):
                 continue
 
+            ref_aware = feature_enabled("ENGRAM_V2_REF_AWARE_DECAY", default=True)
+            ref_state = {"strong": 0, "weak": 0}
+            if ref_aware:
+                ref_state = self.db.get_memory_refcount(memory["id"])
+                if int(ref_state.get("strong", 0)) > 0:
+                    # Strong references pause decay/deletion.
+                    metrics.record_ref_protected_skip(1)
+                    continue
+
             new_strength = calculate_decayed_strength(
                 current_strength=memory.get("strength", 1.0),
                 last_accessed=memory.get("last_accessed", datetime.utcnow().isoformat()),
@@ -1009,7 +1067,18 @@ class Memory(MemoryBase):
                 config=self.fadem_config,
             )
 
-            if should_forget(new_strength, self.fadem_config):
+            if ref_aware and int(ref_state.get("weak", 0)) > 0:
+                weak = min(int(ref_state.get("weak", 0)), 10)
+                dampening = 1.0 + weak * 0.15
+                retained_floor = memory.get("strength", 1.0) * (1.0 - 0.03 / dampening)
+                new_strength = max(new_strength, retained_floor)
+
+            forget_threshold = self.fadem_config.forgetting_threshold
+            if ref_aware and int(ref_state.get("weak", 0)) > 0:
+                weak = min(int(ref_state.get("weak", 0)), 10)
+                forget_threshold = forget_threshold / (1.0 + weak * 0.25)
+
+            if new_strength < forget_threshold:
                 self.delete(memory["id"])
                 forgotten += 1
                 continue
@@ -1033,7 +1102,12 @@ class Memory(MemoryBase):
             self.db.purge_tombstoned()
 
         self.db.log_decay(decayed, forgotten, promoted)
-        return {"decayed": decayed, "forgotten": forgotten, "promoted": promoted}
+        return {
+            "decayed": decayed,
+            "forgotten": forgotten,
+            "promoted": promoted,
+            "stale_refs_removed": stale_refs_removed,
+        }
 
     def fuse_memories(self, memory_ids: List[str], user_id: str = None) -> Dict[str, Any]:
         memories = [self.db.get_memory(mid) for mid in memory_ids]
@@ -1090,6 +1164,280 @@ class Memory(MemoryBase):
 
     def demote(self, memory_id: str) -> Dict[str, Any]:
         return {"success": self.db.update_memory(memory_id, {"layer": "sml"})}
+
+    # v2 kernel facade methods
+    def create_session(
+        self,
+        *,
+        user_id: str,
+        agent_id: Optional[str] = None,
+        allowed_confidentiality_scopes: Optional[List[str]] = None,
+        capabilities: Optional[List[str]] = None,
+        namespaces: Optional[List[str]] = None,
+        ttl_minutes: int = 24 * 60,
+    ) -> Dict[str, Any]:
+        return self.kernel.create_session(
+            user_id=user_id,
+            agent_id=agent_id,
+            allowed_confidentiality_scopes=allowed_confidentiality_scopes,
+            capabilities=capabilities,
+            namespaces=namespaces,
+            ttl_minutes=ttl_minutes,
+        )
+
+    def search_with_context(
+        self,
+        *,
+        query: str,
+        user_id: str,
+        agent_id: Optional[str] = None,
+        token: Optional[str] = None,
+        limit: int = 10,
+        categories: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        return self.kernel.search(
+            query=query,
+            user_id=user_id,
+            agent_id=agent_id,
+            token=token,
+            limit=limit,
+            categories=categories,
+        )
+
+    def propose_write(
+        self,
+        *,
+        content: str,
+        user_id: str,
+        agent_id: Optional[str] = None,
+        token: Optional[str] = None,
+        categories: Optional[List[str]] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        scope: str = "work",
+        namespace: Optional[str] = None,
+        mode: str = "staging",
+        infer: bool = False,
+        source_app: Optional[str] = None,
+        source_type: str = "mcp",
+        source_event_id: Optional[str] = None,
+        trusted_direct: bool = False,
+    ) -> Dict[str, Any]:
+        return self.kernel.propose_write(
+            content=content,
+            user_id=user_id,
+            agent_id=agent_id,
+            token=token,
+            categories=categories,
+            metadata=metadata,
+            scope=scope,
+            namespace=namespace,
+            mode=mode,
+            infer=infer,
+            source_app=source_app,
+            source_type=source_type,
+            source_event_id=source_event_id,
+            trusted_direct=trusted_direct,
+        )
+
+    def list_pending_commits(
+        self,
+        user_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+        token: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.kernel.list_pending_commits(
+            user_id=user_id,
+            status=status,
+            limit=limit,
+            token=token,
+            agent_id=agent_id,
+        )
+
+    def approve_commit(
+        self,
+        commit_id: str,
+        token: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.kernel.approve_commit(commit_id=commit_id, token=token, agent_id=agent_id)
+
+    def reject_commit(
+        self,
+        commit_id: str,
+        reason: Optional[str] = None,
+        token: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.kernel.reject_commit(commit_id=commit_id, reason=reason, token=token, agent_id=agent_id)
+
+    def resolve_conflict(
+        self,
+        stash_id: str,
+        resolution: str,
+        token: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.kernel.resolve_conflict(stash_id=stash_id, resolution=resolution, token=token, agent_id=agent_id)
+
+    def get_daily_digest(
+        self,
+        user_id: str,
+        date_str: str,
+        token: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.kernel.get_daily_digest(
+            user_id=user_id,
+            date_str=date_str,
+            token=token,
+            agent_id=agent_id,
+        )
+
+    def run_sleep_cycle(
+        self,
+        user_id: Optional[str] = None,
+        date_str: Optional[str] = None,
+        apply_decay: bool = True,
+        cleanup_stale_refs: bool = True,
+        token: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.kernel.run_sleep_cycle(
+            user_id=user_id,
+            date_str=date_str,
+            apply_decay=apply_decay,
+            cleanup_stale_refs=cleanup_stale_refs,
+            token=token,
+            agent_id=agent_id,
+        )
+
+    def get_agent_trust(
+        self,
+        user_id: str,
+        agent_id: str,
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.kernel.get_agent_trust(
+            user_id=user_id,
+            agent_id=agent_id,
+            token=token,
+            requester_agent_id=requester_agent_id,
+        )
+
+    def list_namespaces(
+        self,
+        user_id: Optional[str] = None,
+        token: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        return self.kernel.list_namespaces(user_id=user_id, token=token, agent_id=agent_id)
+
+    def declare_namespace(
+        self,
+        *,
+        user_id: str,
+        namespace: str,
+        description: Optional[str] = None,
+        token: Optional[str] = None,
+        agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.kernel.declare_namespace(
+            user_id=user_id,
+            namespace=namespace,
+            description=description,
+            token=token,
+            agent_id=agent_id,
+        )
+
+    def grant_namespace_permission(
+        self,
+        *,
+        user_id: str,
+        namespace: str,
+        agent_id: str,
+        capability: str = "read",
+        expires_at: Optional[str] = None,
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.kernel.grant_namespace_permission(
+            user_id=user_id,
+            namespace=namespace,
+            agent_id=agent_id,
+            capability=capability,
+            expires_at=expires_at,
+            token=token,
+            requester_agent_id=requester_agent_id,
+        )
+
+    def upsert_agent_policy(
+        self,
+        *,
+        user_id: str,
+        agent_id: str,
+        allowed_confidentiality_scopes: Optional[List[str]] = None,
+        allowed_capabilities: Optional[List[str]] = None,
+        allowed_namespaces: Optional[List[str]] = None,
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.kernel.upsert_agent_policy(
+            user_id=user_id,
+            agent_id=agent_id,
+            allowed_confidentiality_scopes=allowed_confidentiality_scopes,
+            allowed_capabilities=allowed_capabilities,
+            allowed_namespaces=allowed_namespaces,
+            token=token,
+            requester_agent_id=requester_agent_id,
+        )
+
+    def get_agent_policy(
+        self,
+        *,
+        user_id: str,
+        agent_id: str,
+        include_wildcard: bool = True,
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        return self.kernel.get_agent_policy(
+            user_id=user_id,
+            agent_id=agent_id,
+            include_wildcard=include_wildcard,
+            token=token,
+            requester_agent_id=requester_agent_id,
+        )
+
+    def list_agent_policies(
+        self,
+        *,
+        user_id: Optional[str] = None,
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        return self.kernel.list_agent_policies(
+            user_id=user_id,
+            token=token,
+            requester_agent_id=requester_agent_id,
+        )
+
+    def delete_agent_policy(
+        self,
+        *,
+        user_id: str,
+        agent_id: str,
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.kernel.delete_agent_policy(
+            user_id=user_id,
+            agent_id=agent_id,
+            token=token,
+            requester_agent_id=requester_agent_id,
+        )
 
     # Internal helpers
     def _extract_memories(
@@ -1837,12 +2185,25 @@ class Memory(MemoryBase):
         self.scene_processor.auto_close_stale(user_id)
 
         current_scene = self.db.get_open_scene(user_id)
-        detection = self.scene_processor.detect_boundary(
-            content=content,
-            timestamp=timestamp,
-            current_scene=current_scene,
-            embedding=embedding,
-        )
+        memory_row = self.db.get_memory(memory_id) or {}
+        namespace = str(memory_row.get("namespace", "default") or "default").strip() or "default"
+        if (
+            current_scene
+            and str(current_scene.get("namespace", "default") or "default").strip() != namespace
+        ):
+            detection = self.scene_processor.detect_boundary(
+                content=content,
+                timestamp=timestamp,
+                current_scene=None,
+                embedding=embedding,
+            )
+        else:
+            detection = self.scene_processor.detect_boundary(
+                content=content,
+                timestamp=timestamp,
+                current_scene=current_scene,
+                embedding=embedding,
+            )
 
         if detection.is_new_scene:
             # Close old scene if open
@@ -1860,6 +2221,7 @@ class Memory(MemoryBase):
                 topic=topic,
                 location=location,
                 embedding=embedding,
+                namespace=namespace,
             )
         else:
             if current_scene:
@@ -1868,6 +2230,7 @@ class Memory(MemoryBase):
                     memory_id=memory_id,
                     embedding=embedding,
                     timestamp=timestamp,
+                    namespace=namespace,
                 )
 
     def _update_profiles(
@@ -1904,6 +2267,7 @@ class Memory(MemoryBase):
         topic: Optional[str] = None,
         start_after: Optional[str] = None,
         start_before: Optional[str] = None,
+        namespace: Optional[str] = None,
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
         """List scenes chronologically."""
@@ -1912,6 +2276,7 @@ class Memory(MemoryBase):
             topic=topic,
             start_after=start_after,
             start_before=start_before,
+            namespace=namespace,
             limit=limit,
         )
 
@@ -1960,3 +2325,15 @@ class Memory(MemoryBase):
     def get_profile_memories(self, profile_id: str) -> List[Dict[str, Any]]:
         """Get memories linked to a profile."""
         return self.db.get_profile_memories(profile_id)
+
+    # =========================================================================
+    # Dashboard / Visualization Methods
+    # =========================================================================
+
+    def get_constellation_data(self, user_id: Optional[str] = None, limit: int = 200) -> Dict[str, Any]:
+        """Get graph nodes + edges for the constellation force layout."""
+        return self.db.get_constellation_data(user_id=user_id, limit=limit)
+
+    def get_decay_log(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Get recent decay history for dashboard sparkline."""
+        return self.db.get_decay_log_entries(limit=limit)

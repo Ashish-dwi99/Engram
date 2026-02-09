@@ -173,6 +173,18 @@ if __name__ == "__main__":
         sys.stdout.write("{}")
 '''
 
+# Prefer the tracked hook file so runtime deployments stay in sync with
+# `plugins/engram-memory/hooks/prompt_context.py` updates.
+_TRACKED_HOOK = (
+    Path(__file__).resolve().parents[2]
+    / "plugins"
+    / "engram-memory"
+    / "hooks"
+    / "prompt_context.py"
+)
+if _TRACKED_HOOK.exists():
+    _PROMPT_CONTEXT_PY = _TRACKED_HOOK.read_text(encoding="utf-8")
+
 _CMD_ENGRAM_MD = """\
 ---
 name: engram

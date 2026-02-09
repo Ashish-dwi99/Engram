@@ -160,8 +160,10 @@ class SQLiteManager:
                 );
                 """
             )
-            # Migration: add scene_id column to memories if missing
-            self._migrate_add_column("memories", "scene_id", "TEXT")
+            # Legacy migration: add scene_id column to memories if missing.
+            self._migrate_add_column_conn(conn, "memories", "scene_id", "TEXT")
+            # v2 schema + idempotent migrations.
+            self._ensure_v2_schema(conn)
 
     @contextmanager
     def _get_connection(self):
@@ -173,9 +175,461 @@ class SQLiteManager:
         finally:
             conn.close()
 
+    def _ensure_v2_schema(self, conn: sqlite3.Connection) -> None:
+        """Create and migrate Engram v2 schema in-place (idempotent)."""
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS schema_migrations (
+                version TEXT PRIMARY KEY,
+                applied_at TEXT DEFAULT CURRENT_TIMESTAMP
+            )
+            """
+        )
+
+        migrations: Dict[str, str] = {
+            "v2_001": """
+                CREATE TABLE IF NOT EXISTS views (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    agent_id TEXT,
+                    timestamp TEXT NOT NULL,
+                    place_type TEXT,
+                    place_value TEXT,
+                    topic_label TEXT,
+                    topic_embedding_ref TEXT,
+                    characters TEXT DEFAULT '[]',
+                    raw_text TEXT,
+                    signals TEXT DEFAULT '{}',
+                    scene_id TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_views_user_time ON views(user_id, timestamp DESC);
+                CREATE INDEX IF NOT EXISTS idx_views_scene ON views(scene_id);
+            """,
+            "v2_002": """
+                CREATE TABLE IF NOT EXISTS proposal_commits (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    agent_id TEXT,
+                    scope TEXT,
+                    status TEXT NOT NULL DEFAULT 'PENDING',
+                    checks TEXT DEFAULT '{}',
+                    preview TEXT DEFAULT '{}',
+                    provenance TEXT DEFAULT '{}',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_proposal_commits_user ON proposal_commits(user_id);
+                CREATE INDEX IF NOT EXISTS idx_proposal_commits_status ON proposal_commits(status);
+
+                CREATE TABLE IF NOT EXISTS proposal_changes (
+                    id TEXT PRIMARY KEY,
+                    commit_id TEXT NOT NULL,
+                    op TEXT NOT NULL,
+                    target TEXT NOT NULL,
+                    target_id TEXT,
+                    patch TEXT DEFAULT '{}',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (commit_id) REFERENCES proposal_commits(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_proposal_changes_commit ON proposal_changes(commit_id);
+            """,
+            "v2_003": """
+                CREATE TABLE IF NOT EXISTS conflict_stash (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    conflict_key TEXT NOT NULL,
+                    existing TEXT DEFAULT '{}',
+                    proposed TEXT DEFAULT '{}',
+                    resolution TEXT NOT NULL DEFAULT 'UNRESOLVED',
+                    source_commit_id TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    resolved_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_conflict_stash_user ON conflict_stash(user_id);
+                CREATE INDEX IF NOT EXISTS idx_conflict_stash_resolution ON conflict_stash(resolution);
+            """,
+            "v2_004": """
+                CREATE TABLE IF NOT EXISTS sessions (
+                    id TEXT PRIMARY KEY,
+                    token_hash TEXT NOT NULL UNIQUE,
+                    user_id TEXT NOT NULL,
+                    agent_id TEXT,
+                    allowed_confidentiality_scopes TEXT DEFAULT '[]',
+                    capabilities TEXT DEFAULT '[]',
+                    expires_at TEXT NOT NULL,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    revoked_at TEXT
+                );
+                CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+                CREATE INDEX IF NOT EXISTS idx_sessions_expires ON sessions(expires_at);
+            """,
+            "v2_005": """
+                CREATE TABLE IF NOT EXISTS memory_refcounts (
+                    memory_id TEXT PRIMARY KEY,
+                    strong_count INTEGER DEFAULT 0,
+                    weak_count INTEGER DEFAULT 0,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (memory_id) REFERENCES memories(id)
+                );
+
+                CREATE TABLE IF NOT EXISTS memory_subscribers (
+                    id TEXT PRIMARY KEY,
+                    memory_id TEXT NOT NULL,
+                    subscriber TEXT NOT NULL,
+                    ref_type TEXT NOT NULL CHECK(ref_type IN ('strong','weak')),
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(memory_id, subscriber, ref_type),
+                    FOREIGN KEY (memory_id) REFERENCES memories(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_memory_subscribers_memory ON memory_subscribers(memory_id);
+            """,
+            "v2_006": """
+                CREATE TABLE IF NOT EXISTS daily_digests (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    digest_date TEXT NOT NULL,
+                    payload TEXT DEFAULT '{}',
+                    generated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, digest_date)
+                );
+                CREATE INDEX IF NOT EXISTS idx_daily_digests_user_date ON daily_digests(user_id, digest_date);
+            """,
+            "v2_007": """
+                CREATE TABLE IF NOT EXISTS invariants (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    invariant_key TEXT NOT NULL,
+                    invariant_value TEXT NOT NULL,
+                    category TEXT DEFAULT 'identity',
+                    confidence REAL DEFAULT 0.0,
+                    source_memory_id TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, invariant_key)
+                );
+                CREATE INDEX IF NOT EXISTS idx_invariants_user ON invariants(user_id);
+            """,
+            "v2_008": """
+                CREATE TABLE IF NOT EXISTS agent_trust (
+                    user_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    total_proposals INTEGER DEFAULT 0,
+                    approved_proposals INTEGER DEFAULT 0,
+                    rejected_proposals INTEGER DEFAULT 0,
+                    auto_stashed_proposals INTEGER DEFAULT 0,
+                    last_proposed_at TEXT,
+                    last_approved_at TEXT,
+                    trust_score REAL DEFAULT 0.0,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    PRIMARY KEY (user_id, agent_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_trust_user ON agent_trust(user_id);
+                CREATE INDEX IF NOT EXISTS idx_agent_trust_score ON agent_trust(trust_score DESC);
+            """,
+            "v2_009": """
+                CREATE TABLE IF NOT EXISTS namespaces (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    name TEXT NOT NULL,
+                    description TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, name)
+                );
+                CREATE INDEX IF NOT EXISTS idx_namespaces_user ON namespaces(user_id);
+
+                CREATE TABLE IF NOT EXISTS namespace_permissions (
+                    id TEXT PRIMARY KEY,
+                    namespace_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    capability TEXT NOT NULL,
+                    granted_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    expires_at TEXT,
+                    FOREIGN KEY (namespace_id) REFERENCES namespaces(id),
+                    UNIQUE(namespace_id, user_id, agent_id, capability)
+                );
+                CREATE INDEX IF NOT EXISTS idx_ns_permissions_agent ON namespace_permissions(user_id, agent_id);
+                CREATE INDEX IF NOT EXISTS idx_ns_permissions_namespace ON namespace_permissions(namespace_id);
+            """,
+            "v2_010": """
+                CREATE TABLE IF NOT EXISTS agent_policies (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    allowed_confidentiality_scopes TEXT DEFAULT '[]',
+                    allowed_capabilities TEXT DEFAULT '[]',
+                    allowed_namespaces TEXT DEFAULT '[]',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    UNIQUE(user_id, agent_id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_agent_policies_user ON agent_policies(user_id);
+                CREATE INDEX IF NOT EXISTS idx_agent_policies_agent ON agent_policies(agent_id);
+            """,
+        }
+
+        for version, ddl in migrations.items():
+            if not self._is_migration_applied(conn, version):
+                conn.executescript(ddl)
+                conn.execute(
+                    "INSERT OR IGNORE INTO schema_migrations (version) VALUES (?)",
+                    (version,),
+                )
+
+        # v2 columns on existing canonical tables.
+        self._migrate_add_column_conn(conn, "memories", "confidentiality_scope", "TEXT DEFAULT 'work'")
+        self._migrate_add_column_conn(conn, "memories", "source_type", "TEXT")
+        self._migrate_add_column_conn(conn, "memories", "source_app", "TEXT")
+        self._migrate_add_column_conn(conn, "memories", "source_event_id", "TEXT")
+        self._migrate_add_column_conn(conn, "memories", "decay_lambda", "REAL DEFAULT 0.12")
+        self._migrate_add_column_conn(conn, "memories", "status", "TEXT DEFAULT 'active'")
+        self._migrate_add_column_conn(conn, "memories", "importance", "REAL DEFAULT 0.5")
+        self._migrate_add_column_conn(conn, "memories", "sensitivity", "TEXT DEFAULT 'normal'")
+        self._migrate_add_column_conn(conn, "memories", "namespace", "TEXT DEFAULT 'default'")
+
+        self._migrate_add_column_conn(conn, "scenes", "layer", "TEXT DEFAULT 'sml'")
+        self._migrate_add_column_conn(conn, "scenes", "scene_strength", "REAL DEFAULT 1.0")
+        self._migrate_add_column_conn(conn, "scenes", "topic_embedding_ref", "TEXT")
+        self._migrate_add_column_conn(conn, "scenes", "namespace", "TEXT DEFAULT 'default'")
+
+        self._migrate_add_column_conn(conn, "profiles", "role_bias", "TEXT")
+        self._migrate_add_column_conn(conn, "profiles", "profile_summary", "TEXT")
+        self._migrate_add_column_conn(conn, "sessions", "namespaces", "TEXT DEFAULT '[]'")
+        self._migrate_add_column_conn(conn, "memory_subscribers", "last_seen_at", "TEXT")
+        self._migrate_add_column_conn(conn, "memory_subscribers", "expires_at", "TEXT")
+
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_subscribers_expires ON memory_subscribers(expires_at)")
+
+        # Backfills.
+        conn.execute(
+            """
+            UPDATE memories
+            SET confidentiality_scope = 'work'
+            WHERE confidentiality_scope IS NULL OR confidentiality_scope = ''
+            """
+        )
+        conn.execute(
+            """
+            UPDATE memories
+            SET status = 'active'
+            WHERE status IS NULL OR status = ''
+            """
+        )
+        conn.execute(
+            """
+            UPDATE memories
+            SET namespace = 'default'
+            WHERE namespace IS NULL OR namespace = ''
+            """
+        )
+        conn.execute(
+            """
+            UPDATE scenes
+            SET namespace = 'default'
+            WHERE namespace IS NULL OR namespace = ''
+            """
+        )
+        conn.execute(
+            """
+            UPDATE sessions
+            SET namespaces = '[]'
+            WHERE namespaces IS NULL OR namespaces = ''
+            """
+        )
+        conn.execute(
+            """
+            UPDATE memories
+            SET decay_lambda = 0.12
+            WHERE decay_lambda IS NULL
+            """
+        )
+        conn.execute(
+            """
+            UPDATE memory_subscribers
+            SET
+                last_seen_at = COALESCE(last_seen_at, created_at),
+                expires_at = COALESCE(
+                    expires_at,
+                    CASE
+                        WHEN ref_type = 'weak' THEN datetime(created_at, '+14 days')
+                        ELSE NULL
+                    END
+                )
+            """
+        )
+        conn.execute(
+            """
+            UPDATE memories
+            SET importance = COALESCE(
+                CASE
+                    WHEN json_extract(metadata, '$.importance') IS NOT NULL
+                    THEN json_extract(metadata, '$.importance')
+                    ELSE importance
+                END,
+                0.5
+            )
+            """
+        )
+        conn.execute(
+            """
+            UPDATE memories
+            SET sensitivity = CASE
+                WHEN lower(memory) LIKE '%password%' OR lower(memory) LIKE '%api key%' OR lower(memory) LIKE '%token%'
+                    THEN 'secret'
+                WHEN lower(memory) LIKE '%health%' OR lower(memory) LIKE '%medical%'
+                    THEN 'sensitive'
+                WHEN lower(memory) LIKE '%bank%' OR lower(memory) LIKE '%salary%' OR lower(memory) LIKE '%credit card%'
+                    THEN 'sensitive'
+                ELSE COALESCE(NULLIF(sensitivity, ''), 'normal')
+            END
+            """
+        )
+        # Keep memory_refcounts bootstrapped for existing memories.
+        conn.execute(
+            """
+            INSERT OR IGNORE INTO memory_refcounts (memory_id, strong_count, weak_count)
+            SELECT id, 0, 0 FROM memories
+            """
+        )
+        self._seed_default_namespaces(conn)
+        self._seed_invariants(conn)
+
+    def _seed_default_namespaces(self, conn: sqlite3.Connection) -> None:
+        users = conn.execute(
+            """
+            SELECT DISTINCT user_id FROM memories
+            WHERE user_id IS NOT NULL AND user_id != ''
+            """
+        ).fetchall()
+        now = datetime.utcnow().isoformat()
+        for row in users:
+            user_id = row["user_id"]
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO namespaces (id, user_id, name, description, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (str(uuid.uuid4()), user_id, "default", "Default namespace", now, now),
+            )
+
+    def _seed_invariants(self, conn: sqlite3.Connection) -> None:
+        """Bootstrap protected invariants from self profile and explicit memories."""
+        rows = conn.execute(
+            """
+            SELECT id, user_id, memory, metadata
+            FROM memories
+            WHERE tombstone = 0 AND (
+                lower(memory) LIKE 'name:%'
+                OR lower(memory) LIKE 'my name is %'
+                OR lower(memory) LIKE '%@%'
+                OR json_extract(metadata, '$.policy_explicit') = 1
+                OR json_extract(metadata, '$.policy_explicit') = 'true'
+            )
+            ORDER BY created_at DESC
+            """
+        ).fetchall()
+
+        for row in rows:
+            memory = (row["memory"] or "").strip()
+            memory_lower = memory.lower()
+            key = None
+            value = None
+            category = "identity"
+
+            if memory_lower.startswith("name:"):
+                key = "identity.name"
+                value = memory.split(":", 1)[1].strip()
+            elif memory_lower.startswith("my name is "):
+                key = "identity.name"
+                value = memory[11:].strip()
+            elif "@" in memory and " " not in memory.strip():
+                key = "identity.primary_email"
+                value = memory.strip()
+            elif "email" in memory_lower and "@" in memory:
+                key = "identity.primary_email"
+                value = memory.strip()
+
+            if not key or not value:
+                continue
+
+            conn.execute(
+                """
+                INSERT INTO invariants (
+                    id, user_id, invariant_key, invariant_value, category, confidence, source_memory_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, invariant_key) DO UPDATE SET
+                    invariant_value=excluded.invariant_value,
+                    confidence=max(invariants.confidence, excluded.confidence),
+                    source_memory_id=excluded.source_memory_id,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    str(uuid.uuid4()),
+                    row["user_id"] or "default",
+                    key,
+                    value,
+                    category,
+                    0.9,
+                    row["id"],
+                ),
+            )
+
+        # Seed from self profile summary/name if available.
+        profile_rows = conn.execute(
+            """
+            SELECT id, user_id, name
+            FROM profiles
+            WHERE profile_type = 'self'
+            """
+        ).fetchall()
+        for row in profile_rows:
+            if not row["name"] or row["name"].lower() == "self":
+                continue
+            conn.execute(
+                """
+                INSERT INTO invariants (
+                    id, user_id, invariant_key, invariant_value, category, confidence, source_memory_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, invariant_key) DO NOTHING
+                """,
+                (
+                    str(uuid.uuid4()),
+                    row["user_id"] or "default",
+                    "identity.name",
+                    row["name"],
+                    "identity",
+                    0.95,
+                    None,
+                ),
+            )
+
+    def _is_migration_applied(self, conn: sqlite3.Connection, version: str) -> bool:
+        row = conn.execute(
+            "SELECT 1 FROM schema_migrations WHERE version = ?",
+            (version,),
+        ).fetchone()
+        return row is not None
+
+    def _migrate_add_column_conn(
+        self,
+        conn: sqlite3.Connection,
+        table: str,
+        column: str,
+        col_type: str,
+    ) -> None:
+        """Add a column using an existing connection, if missing."""
+        try:
+            conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+        except sqlite3.OperationalError:
+            pass
+
     def add_memory(self, memory_data: Dict[str, Any]) -> str:
         memory_id = memory_data.get("id", str(uuid.uuid4()))
         now = datetime.utcnow().isoformat()
+        metadata = memory_data.get("metadata", {}) or {}
+        source_app = memory_data.get("source_app") or memory_data.get("app_id") or metadata.get("source_app")
 
         with self._get_connection() as conn:
             conn.execute(
@@ -184,8 +638,10 @@ class SQLiteManager:
                     id, memory, user_id, agent_id, run_id, app_id,
                     metadata, categories, immutable, expiration_date,
                     created_at, updated_at, layer, strength, access_count,
-                    last_accessed, embedding, related_memories, source_memories, tombstone
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    last_accessed, embedding, related_memories, source_memories, tombstone,
+                    confidentiality_scope, namespace, source_type, source_app, source_event_id, decay_lambda,
+                    status, importance, sensitivity
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     memory_id,
@@ -208,7 +664,24 @@ class SQLiteManager:
                     json.dumps(memory_data.get("related_memories", [])),
                     json.dumps(memory_data.get("source_memories", [])),
                     1 if memory_data.get("tombstone", False) else 0,
+                    memory_data.get("confidentiality_scope", "work"),
+                    memory_data.get("namespace", metadata.get("namespace", "default")),
+                    memory_data.get("source_type") or metadata.get("source_type") or "mcp",
+                    source_app,
+                    memory_data.get("source_event_id") or metadata.get("source_event_id"),
+                    memory_data.get("decay_lambda", 0.12),
+                    memory_data.get("status", "active"),
+                    memory_data.get("importance", metadata.get("importance", 0.5)),
+                    memory_data.get("sensitivity", metadata.get("sensitivity", "normal")),
                 ),
+            )
+
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO memory_refcounts (memory_id, strong_count, weak_count)
+                VALUES (?, 0, 0)
+                """,
+                (memory_id,),
             )
 
         self._log_event(memory_id, "ADD", new_value=memory_data.get("memory"))
@@ -234,6 +707,7 @@ class SQLiteManager:
         run_id: Optional[str] = None,
         app_id: Optional[str] = None,
         layer: Optional[str] = None,
+        namespace: Optional[str] = None,
         min_strength: float = 0.0,
         include_tombstoned: bool = False,
     ) -> List[Dict[str, Any]]:
@@ -257,6 +731,9 @@ class SQLiteManager:
         if layer:
             query += " AND layer = ?"
             params.append(layer)
+        if namespace:
+            query += " AND namespace = ?"
+            params.append(namespace)
 
         query += " ORDER BY strength DESC"
 
@@ -462,11 +939,8 @@ class SQLiteManager:
 
     def _migrate_add_column(self, table: str, column: str, col_type: str) -> None:
         """Add a column to an existing table if it doesn't already exist."""
-        try:
-            with self._get_connection() as conn:
-                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
-        except sqlite3.OperationalError:
-            pass  # Column already exists
+        with self._get_connection() as conn:
+            self._migrate_add_column_conn(conn, table, column, col_type)
 
     # =========================================================================
     # Scene methods
@@ -480,8 +954,9 @@ class SQLiteManager:
                 INSERT INTO scenes (
                     id, user_id, title, summary, topic, location,
                     participants, memory_ids, start_time, end_time,
-                    embedding, strength, access_count, tombstone
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    embedding, strength, access_count, tombstone,
+                    layer, scene_strength, topic_embedding_ref, namespace
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     scene_id,
@@ -498,6 +973,10 @@ class SQLiteManager:
                     scene_data.get("strength", 1.0),
                     scene_data.get("access_count", 0),
                     1 if scene_data.get("tombstone", False) else 0,
+                    scene_data.get("layer", "sml"),
+                    scene_data.get("scene_strength", scene_data.get("strength", 1.0)),
+                    scene_data.get("topic_embedding_ref"),
+                    scene_data.get("namespace", "default"),
                 ),
             )
         return scene_id
@@ -550,6 +1029,7 @@ class SQLiteManager:
         topic: Optional[str] = None,
         start_after: Optional[str] = None,
         start_before: Optional[str] = None,
+        namespace: Optional[str] = None,
         limit: int = 50,
     ) -> List[Dict[str, Any]]:
         query = "SELECT * FROM scenes WHERE tombstone = 0"
@@ -566,6 +1046,9 @@ class SQLiteManager:
         if start_before:
             query += " AND start_time <= ?"
             params.append(start_before)
+        if namespace:
+            query += " AND namespace = ?"
+            params.append(namespace)
         query += " ORDER BY start_time DESC LIMIT ?"
         params.append(limit)
         with self._get_connection() as conn:
@@ -618,8 +1101,8 @@ class SQLiteManager:
                     id, user_id, name, profile_type, narrative,
                     facts, preferences, relationships, sentiment,
                     theory_of_mind, aliases, embedding, strength,
-                    created_at, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    created_at, updated_at, role_bias, profile_summary
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     profile_id,
@@ -637,6 +1120,8 @@ class SQLiteManager:
                     profile_data.get("strength", 1.0),
                     profile_data.get("created_at", now),
                     profile_data.get("updated_at", now),
+                    profile_data.get("role_bias"),
+                    profile_data.get("profile_summary"),
                 ),
             )
         return profile_id
@@ -743,3 +1228,1162 @@ class SQLiteManager:
                 (f'%"{category_id}"%', min_strength, limit),
             ).fetchall()
             return [self._row_to_dict(row) for row in rows]
+
+    # =========================================================================
+    # v2 Session methods
+    # =========================================================================
+
+    def create_session(self, session_data: Dict[str, Any]) -> str:
+        session_id = session_data.get("id", str(uuid.uuid4()))
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO sessions (
+                    id, token_hash, user_id, agent_id,
+                    allowed_confidentiality_scopes, capabilities, namespaces, expires_at, revoked_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    session_data.get("token_hash"),
+                    session_data.get("user_id"),
+                    session_data.get("agent_id"),
+                    json.dumps(session_data.get("allowed_confidentiality_scopes", [])),
+                    json.dumps(session_data.get("capabilities", [])),
+                    json.dumps(session_data.get("namespaces", [])),
+                    session_data.get("expires_at"),
+                    session_data.get("revoked_at"),
+                ),
+            )
+        return session_id
+
+    def get_session_by_token_hash(self, token_hash: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM sessions WHERE token_hash = ?",
+                (token_hash,),
+            ).fetchone()
+            if row:
+                data = dict(row)
+                data["allowed_confidentiality_scopes"] = self._parse_json_value(
+                    data.get("allowed_confidentiality_scopes"), []
+                )
+                data["capabilities"] = self._parse_json_value(data.get("capabilities"), [])
+                data["namespaces"] = self._parse_json_value(data.get("namespaces"), [])
+                return data
+        return None
+
+    def revoke_session(self, session_id: str) -> bool:
+        with self._get_connection() as conn:
+            conn.execute(
+                "UPDATE sessions SET revoked_at = ? WHERE id = ?",
+                (datetime.utcnow().isoformat(), session_id),
+            )
+        return True
+
+    # =========================================================================
+    # v2 Staging / proposal methods
+    # =========================================================================
+
+    def add_proposal_commit(self, commit_data: Dict[str, Any], changes: Optional[List[Dict[str, Any]]] = None) -> str:
+        commit_id = commit_data.get("id", str(uuid.uuid4()))
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO proposal_commits (
+                    id, user_id, agent_id, scope, status, checks, preview, provenance, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    commit_id,
+                    commit_data.get("user_id"),
+                    commit_data.get("agent_id"),
+                    commit_data.get("scope"),
+                    commit_data.get("status", "PENDING"),
+                    json.dumps(commit_data.get("checks", {})),
+                    json.dumps(commit_data.get("preview", {})),
+                    json.dumps(commit_data.get("provenance", {})),
+                    commit_data.get("created_at", datetime.utcnow().isoformat()),
+                    commit_data.get("updated_at", datetime.utcnow().isoformat()),
+                ),
+            )
+            for change in changes or []:
+                conn.execute(
+                    """
+                    INSERT INTO proposal_changes (
+                        id, commit_id, op, target, target_id, patch, created_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        change.get("id", str(uuid.uuid4())),
+                        commit_id,
+                        change.get("op", "ADD"),
+                        change.get("target", "memory_item"),
+                        change.get("target_id"),
+                        json.dumps(change.get("patch", {})),
+                        change.get("created_at", datetime.utcnow().isoformat()),
+                    ),
+                )
+        return commit_id
+
+    def get_proposal_commit(self, commit_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM proposal_commits WHERE id = ?",
+                (commit_id,),
+            ).fetchone()
+            if not row:
+                return None
+            data = dict(row)
+            data["checks"] = self._parse_json_value(data.get("checks"), {})
+            data["preview"] = self._parse_json_value(data.get("preview"), {})
+            data["provenance"] = self._parse_json_value(data.get("provenance"), {})
+            data["changes"] = self.get_proposal_changes(commit_id)
+            return data
+
+    def list_proposal_commits(
+        self,
+        user_id: Optional[str] = None,
+        status: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM proposal_commits WHERE 1=1"
+        params: List[Any] = []
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        commits: List[Dict[str, Any]] = []
+        for row in rows:
+            data = dict(row)
+            data["checks"] = self._parse_json_value(data.get("checks"), {})
+            data["preview"] = self._parse_json_value(data.get("preview"), {})
+            data["provenance"] = self._parse_json_value(data.get("provenance"), {})
+            commits.append(data)
+        return commits
+
+    def get_proposal_changes(self, commit_id: str) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM proposal_changes WHERE commit_id = ? ORDER BY created_at ASC",
+                (commit_id,),
+            ).fetchall()
+        changes = [dict(row) for row in rows]
+        for change in changes:
+            change["patch"] = self._parse_json_value(change.get("patch"), {})
+        return changes
+
+    def update_proposal_commit(self, commit_id: str, updates: Dict[str, Any]) -> bool:
+        set_clauses = []
+        params: List[Any] = []
+        for key, value in updates.items():
+            if key in {"checks", "preview", "provenance"}:
+                value = json.dumps(value)
+            set_clauses.append(f"{key} = ?")
+            params.append(value)
+        set_clauses.append("updated_at = ?")
+        params.append(datetime.utcnow().isoformat())
+        params.append(commit_id)
+        with self._get_connection() as conn:
+            conn.execute(
+                f"UPDATE proposal_commits SET {', '.join(set_clauses)} WHERE id = ?",
+                params,
+            )
+        return True
+
+    def transition_proposal_commit_status(
+        self,
+        commit_id: str,
+        *,
+        from_statuses: Iterable[str],
+        to_status: str,
+        updates: Optional[Dict[str, Any]] = None,
+    ) -> bool:
+        normalized_from = [str(status or "").upper() for status in from_statuses if str(status or "").strip()]
+        if not normalized_from:
+            return False
+
+        set_clauses = ["status = ?", "updated_at = ?"]
+        params: List[Any] = [str(to_status or "").upper(), datetime.utcnow().isoformat()]
+        for key, value in (updates or {}).items():
+            if key in {"checks", "preview", "provenance"}:
+                value = json.dumps(value)
+            set_clauses.append(f"{key} = ?")
+            params.append(value)
+
+        placeholders = ", ".join("?" for _ in normalized_from)
+        params.append(commit_id)
+        params.extend(normalized_from)
+
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                f"""
+                UPDATE proposal_commits
+                SET {', '.join(set_clauses)}
+                WHERE id = ? AND status IN ({placeholders})
+                """,
+                params,
+            )
+            return cursor.rowcount > 0
+
+    # =========================================================================
+    # v2 Conflict stash methods
+    # =========================================================================
+
+    def add_conflict_stash(self, stash_data: Dict[str, Any]) -> str:
+        stash_id = stash_data.get("id", str(uuid.uuid4()))
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO conflict_stash (
+                    id, user_id, conflict_key, existing, proposed, resolution, source_commit_id, created_at, resolved_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    stash_id,
+                    stash_data.get("user_id"),
+                    stash_data.get("conflict_key"),
+                    json.dumps(stash_data.get("existing", {})),
+                    json.dumps(stash_data.get("proposed", {})),
+                    stash_data.get("resolution", "UNRESOLVED"),
+                    stash_data.get("source_commit_id"),
+                    stash_data.get("created_at", datetime.utcnow().isoformat()),
+                    stash_data.get("resolved_at"),
+                ),
+            )
+        return stash_id
+
+    def get_conflict_stash(self, stash_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM conflict_stash WHERE id = ?",
+                (stash_id,),
+            ).fetchone()
+            if not row:
+                return None
+            data = dict(row)
+            data["existing"] = self._parse_json_value(data.get("existing"), {})
+            data["proposed"] = self._parse_json_value(data.get("proposed"), {})
+            return data
+
+    def list_conflict_stash(
+        self,
+        user_id: Optional[str] = None,
+        resolution: Optional[str] = None,
+        limit: int = 100,
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM conflict_stash WHERE 1=1"
+        params: List[Any] = []
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
+        if resolution:
+            query += " AND resolution = ?"
+            params.append(resolution)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        results: List[Dict[str, Any]] = []
+        for row in rows:
+            data = dict(row)
+            data["existing"] = self._parse_json_value(data.get("existing"), {})
+            data["proposed"] = self._parse_json_value(data.get("proposed"), {})
+            results.append(data)
+        return results
+
+    def resolve_conflict_stash(self, stash_id: str, resolution: str) -> bool:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                UPDATE conflict_stash
+                SET resolution = ?, resolved_at = ?
+                WHERE id = ?
+                """,
+                (resolution, datetime.utcnow().isoformat(), stash_id),
+            )
+        return True
+
+    # =========================================================================
+    # v2 View methods
+    # =========================================================================
+
+    def add_view(self, view_data: Dict[str, Any]) -> str:
+        view_id = view_data.get("id", str(uuid.uuid4()))
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO views (
+                    id, user_id, agent_id, timestamp, place_type, place_value,
+                    topic_label, topic_embedding_ref, characters, raw_text,
+                    signals, scene_id, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    view_id,
+                    view_data.get("user_id"),
+                    view_data.get("agent_id"),
+                    view_data.get("timestamp", datetime.utcnow().isoformat()),
+                    view_data.get("place_type"),
+                    view_data.get("place_value"),
+                    view_data.get("topic_label"),
+                    view_data.get("topic_embedding_ref"),
+                    json.dumps(view_data.get("characters", [])),
+                    view_data.get("raw_text"),
+                    json.dumps(view_data.get("signals", {})),
+                    view_data.get("scene_id"),
+                    view_data.get("created_at", datetime.utcnow().isoformat()),
+                ),
+            )
+        return view_id
+
+    def get_views(
+        self,
+        user_id: Optional[str] = None,
+        scene_id: Optional[str] = None,
+        limit: int = 200,
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM views WHERE 1=1"
+        params: List[Any] = []
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
+        if scene_id:
+            query += " AND scene_id = ?"
+            params.append(scene_id)
+        query += " ORDER BY timestamp DESC LIMIT ?"
+        params.append(limit)
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        views = [dict(row) for row in rows]
+        for view in views:
+            view["characters"] = self._parse_json_value(view.get("characters"), [])
+            view["signals"] = self._parse_json_value(view.get("signals"), {})
+        return views
+
+    # =========================================================================
+    # v2 Refcount methods
+    # =========================================================================
+
+    def get_memory_refcount(self, memory_id: str) -> Dict[str, Any]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM memory_refcounts WHERE memory_id = ?",
+                (memory_id,),
+            ).fetchone()
+        if not row:
+            return {"memory_id": memory_id, "strong": 0, "weak": 0, "subscribers": []}
+        subscribers = self.list_memory_subscribers(memory_id)
+        return {
+            "memory_id": memory_id,
+            "strong": int(row["strong_count"]),
+            "weak": int(row["weak_count"]),
+            "subscribers": subscribers,
+        }
+
+    def adjust_memory_refcount(self, memory_id: str, strong_delta: int = 0, weak_delta: int = 0) -> Dict[str, Any]:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO memory_refcounts (memory_id, strong_count, weak_count)
+                VALUES (?, 0, 0)
+                """,
+                (memory_id,),
+            )
+            conn.execute(
+                """
+                UPDATE memory_refcounts
+                SET
+                    strong_count = CASE WHEN strong_count + ? < 0 THEN 0 ELSE strong_count + ? END,
+                    weak_count = CASE WHEN weak_count + ? < 0 THEN 0 ELSE weak_count + ? END,
+                    updated_at = ?
+                WHERE memory_id = ?
+                """,
+                (
+                    strong_delta,
+                    strong_delta,
+                    weak_delta,
+                    weak_delta,
+                    datetime.utcnow().isoformat(),
+                    memory_id,
+                ),
+            )
+        return self.get_memory_refcount(memory_id)
+
+    def add_memory_subscriber(
+        self,
+        memory_id: str,
+        subscriber: str,
+        ref_type: str = "weak",
+        ttl_hours: Optional[int] = None,
+    ) -> None:
+        now = datetime.utcnow().isoformat()
+        expires_at = None
+        if ttl_hours is not None:
+            try:
+                ttl_value = int(ttl_hours)
+            except Exception:
+                ttl_value = 0
+            if ttl_value > 0:
+                expires_at = datetime.utcfromtimestamp(
+                    datetime.utcnow().timestamp() + ttl_value * 3600
+                ).isoformat()
+            elif ttl_value < 0:
+                expires_at = datetime.utcfromtimestamp(
+                    datetime.utcnow().timestamp() + ttl_value * 3600
+                ).isoformat()
+        elif ref_type == "weak":
+            expires_at = datetime.utcfromtimestamp(
+                datetime.utcnow().timestamp() + 14 * 24 * 3600
+            ).isoformat()
+
+        with self._get_connection() as conn:
+            existing = conn.execute(
+                """
+                SELECT 1 FROM memory_subscribers
+                WHERE memory_id = ? AND subscriber = ? AND ref_type = ?
+                """,
+                (memory_id, subscriber, ref_type),
+            ).fetchone()
+            conn.execute(
+                """
+                INSERT INTO memory_subscribers (id, memory_id, subscriber, ref_type, created_at, last_seen_at, expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(memory_id, subscriber, ref_type) DO UPDATE SET
+                    last_seen_at=excluded.last_seen_at,
+                    expires_at=excluded.expires_at
+                """,
+                (
+                    str(uuid.uuid4()),
+                    memory_id,
+                    subscriber,
+                    ref_type,
+                    now,
+                    now,
+                    expires_at,
+                ),
+            )
+        if existing is None:
+            self.adjust_memory_refcount(
+                memory_id,
+                strong_delta=1 if ref_type == "strong" else 0,
+                weak_delta=1 if ref_type == "weak" else 0,
+            )
+
+    def remove_memory_subscriber(self, memory_id: str, subscriber: str, ref_type: str = "weak") -> None:
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM memory_subscribers
+                WHERE memory_id = ? AND subscriber = ? AND ref_type = ?
+                """,
+                (memory_id, subscriber, ref_type),
+            )
+        if cursor.rowcount > 0:
+            self.adjust_memory_refcount(
+                memory_id,
+                strong_delta=-1 if ref_type == "strong" else 0,
+                weak_delta=-1 if ref_type == "weak" else 0,
+            )
+
+    def list_memory_subscribers(self, memory_id: str) -> List[str]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT subscriber, ref_type
+                FROM memory_subscribers
+                WHERE memory_id = ?
+                ORDER BY created_at ASC
+                """,
+                (memory_id,),
+            ).fetchall()
+        return [f"{row['subscriber']}:{row['ref_type']}" for row in rows]
+
+    def cleanup_stale_memory_subscribers(self, now_iso: Optional[str] = None) -> int:
+        now_iso = now_iso or datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT memory_id, subscriber, ref_type
+                FROM memory_subscribers
+                WHERE expires_at IS NOT NULL AND expires_at <= ?
+                """,
+                (now_iso,),
+            ).fetchall()
+            if not rows:
+                return 0
+            removed = 0
+            for row in rows:
+                cursor = conn.execute(
+                    """
+                    DELETE FROM memory_subscribers
+                    WHERE memory_id = ? AND subscriber = ? AND ref_type = ?
+                    """,
+                    (row["memory_id"], row["subscriber"], row["ref_type"]),
+                )
+                if cursor.rowcount <= 0:
+                    continue
+                removed += cursor.rowcount
+                conn.execute(
+                    """
+                    UPDATE memory_refcounts
+                    SET
+                        strong_count = CASE
+                            WHEN ? = 'strong' THEN CASE WHEN strong_count - 1 < 0 THEN 0 ELSE strong_count - 1 END
+                            ELSE strong_count
+                        END,
+                        weak_count = CASE
+                            WHEN ? = 'weak' THEN CASE WHEN weak_count - 1 < 0 THEN 0 ELSE weak_count - 1 END
+                            ELSE weak_count
+                        END,
+                        updated_at = ?
+                    WHERE memory_id = ?
+                    """,
+                    (row["ref_type"], row["ref_type"], now_iso, row["memory_id"]),
+                )
+        return removed
+
+    # =========================================================================
+    # v2 Daily digest methods
+    # =========================================================================
+
+    def upsert_daily_digest(self, user_id: str, digest_date: str, payload: Dict[str, Any]) -> str:
+        digest_id = str(uuid.uuid4())
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO daily_digests (id, user_id, digest_date, payload, generated_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, digest_date) DO UPDATE SET
+                    payload=excluded.payload,
+                    generated_at=excluded.generated_at
+                """,
+                (
+                    digest_id,
+                    user_id,
+                    digest_date,
+                    json.dumps(payload),
+                    datetime.utcnow().isoformat(),
+                ),
+            )
+        return digest_id
+
+    def get_daily_digest(self, user_id: str, digest_date: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM daily_digests
+                WHERE user_id = ? AND digest_date = ?
+                """,
+                (user_id, digest_date),
+            ).fetchone()
+        if not row:
+            return None
+        data = dict(row)
+        data["payload"] = self._parse_json_value(data.get("payload"), {})
+        return data
+
+    # =========================================================================
+    # v2 Agent trust methods
+    # =========================================================================
+
+    def get_agent_trust(self, user_id: str, agent_id: str) -> Dict[str, Any]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM agent_trust
+                WHERE user_id = ? AND agent_id = ?
+                """,
+                (user_id, agent_id),
+            ).fetchone()
+        if row:
+            return dict(row)
+        return {
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "total_proposals": 0,
+            "approved_proposals": 0,
+            "rejected_proposals": 0,
+            "auto_stashed_proposals": 0,
+            "last_proposed_at": None,
+            "last_approved_at": None,
+            "trust_score": 0.0,
+        }
+
+    @staticmethod
+    def _compute_trust_score(
+        *,
+        total_proposals: int,
+        approved_proposals: int,
+        last_approved_at: Optional[str],
+    ) -> float:
+        approval_rate = approved_proposals / total_proposals if total_proposals > 0 else 0.0
+        recency_score = 0.0
+        if last_approved_at:
+            try:
+                approved_dt = datetime.fromisoformat(last_approved_at)
+                days_since = max(
+                    0.0,
+                    (datetime.utcnow() - approved_dt).total_seconds() / 86400.0,
+                )
+                recency_score = max(0.0, 1.0 - min(days_since, 30.0) / 30.0)
+            except Exception:
+                recency_score = 0.0
+        return round((approval_rate * 0.7) + (recency_score * 0.3), 4)
+
+    def _upsert_agent_trust_row(
+        self,
+        *,
+        user_id: str,
+        agent_id: str,
+        total_proposals: int,
+        approved_proposals: int,
+        rejected_proposals: int,
+        auto_stashed_proposals: int,
+        last_proposed_at: Optional[str],
+        last_approved_at: Optional[str],
+    ) -> Dict[str, Any]:
+        trust_score = self._compute_trust_score(
+            total_proposals=total_proposals,
+            approved_proposals=approved_proposals,
+            last_approved_at=last_approved_at,
+        )
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_trust (
+                    user_id, agent_id, total_proposals, approved_proposals, rejected_proposals,
+                    auto_stashed_proposals, last_proposed_at, last_approved_at, trust_score, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, agent_id) DO UPDATE SET
+                    total_proposals=excluded.total_proposals,
+                    approved_proposals=excluded.approved_proposals,
+                    rejected_proposals=excluded.rejected_proposals,
+                    auto_stashed_proposals=excluded.auto_stashed_proposals,
+                    last_proposed_at=excluded.last_proposed_at,
+                    last_approved_at=excluded.last_approved_at,
+                    trust_score=excluded.trust_score,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    user_id,
+                    agent_id,
+                    int(total_proposals),
+                    int(approved_proposals),
+                    int(rejected_proposals),
+                    int(auto_stashed_proposals),
+                    last_proposed_at,
+                    last_approved_at,
+                    trust_score,
+                    datetime.utcnow().isoformat(),
+                ),
+            )
+        return self.get_agent_trust(user_id=user_id, agent_id=agent_id)
+
+    def record_agent_proposal(self, user_id: str, agent_id: Optional[str], status: str) -> Dict[str, Any]:
+        if not user_id or not agent_id:
+            return {}
+        current = self.get_agent_trust(user_id=user_id, agent_id=agent_id)
+        now_iso = datetime.utcnow().isoformat()
+        auto_stashed = int(current.get("auto_stashed_proposals", 0))
+        if (status or "").upper() == "AUTO_STASHED":
+            auto_stashed += 1
+        return self._upsert_agent_trust_row(
+            user_id=user_id,
+            agent_id=agent_id,
+            total_proposals=int(current.get("total_proposals", 0)) + 1,
+            approved_proposals=int(current.get("approved_proposals", 0)),
+            rejected_proposals=int(current.get("rejected_proposals", 0)),
+            auto_stashed_proposals=auto_stashed,
+            last_proposed_at=now_iso,
+            last_approved_at=current.get("last_approved_at"),
+        )
+
+    def record_agent_commit_outcome(self, user_id: str, agent_id: Optional[str], outcome: str) -> Dict[str, Any]:
+        if not user_id or not agent_id:
+            return {}
+        current = self.get_agent_trust(user_id=user_id, agent_id=agent_id)
+        outcome_upper = (outcome or "").upper()
+        approved = int(current.get("approved_proposals", 0))
+        rejected = int(current.get("rejected_proposals", 0))
+        auto_stashed = int(current.get("auto_stashed_proposals", 0))
+        last_approved_at = current.get("last_approved_at")
+        now_iso = datetime.utcnow().isoformat()
+        if outcome_upper == "APPROVED":
+            approved += 1
+            last_approved_at = now_iso
+        elif outcome_upper == "REJECTED":
+            rejected += 1
+        elif outcome_upper == "AUTO_STASHED":
+            auto_stashed += 1
+        return self._upsert_agent_trust_row(
+            user_id=user_id,
+            agent_id=agent_id,
+            total_proposals=int(current.get("total_proposals", 0)),
+            approved_proposals=approved,
+            rejected_proposals=rejected,
+            auto_stashed_proposals=auto_stashed,
+            last_proposed_at=current.get("last_proposed_at"),
+            last_approved_at=last_approved_at,
+        )
+
+    # =========================================================================
+    # v2 Namespace methods
+    # =========================================================================
+
+    def ensure_namespace(self, user_id: str, name: str, description: Optional[str] = None) -> str:
+        ns_name = (name or "default").strip() or "default"
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT id FROM namespaces WHERE user_id = ? AND name = ?
+                """,
+                (user_id, ns_name),
+            ).fetchone()
+            if row:
+                namespace_id = row["id"]
+                conn.execute(
+                    """
+                    UPDATE namespaces
+                    SET description = COALESCE(?, description), updated_at = ?
+                    WHERE id = ?
+                    """,
+                    (description, datetime.utcnow().isoformat(), namespace_id),
+                )
+                return namespace_id
+            namespace_id = str(uuid.uuid4())
+            conn.execute(
+                """
+                INSERT INTO namespaces (id, user_id, name, description, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    namespace_id,
+                    user_id,
+                    ns_name,
+                    description,
+                    datetime.utcnow().isoformat(),
+                    datetime.utcnow().isoformat(),
+                ),
+            )
+            return namespace_id
+
+    def list_namespaces(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM namespaces WHERE 1=1"
+        params: List[Any] = []
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
+        query += " ORDER BY created_at ASC"
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def grant_namespace_permission(
+        self,
+        *,
+        user_id: str,
+        agent_id: str,
+        namespace: str,
+        capability: str = "read",
+        expires_at: Optional[str] = None,
+    ) -> str:
+        namespace_id = self.ensure_namespace(user_id=user_id, name=namespace)
+        permission_id = str(uuid.uuid4())
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO namespace_permissions (
+                    id, namespace_id, user_id, agent_id, capability, granted_at, expires_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(namespace_id, user_id, agent_id, capability) DO UPDATE SET
+                    expires_at=excluded.expires_at,
+                    granted_at=excluded.granted_at
+                """,
+                (
+                    permission_id,
+                    namespace_id,
+                    user_id,
+                    agent_id,
+                    capability,
+                    datetime.utcnow().isoformat(),
+                    expires_at,
+                ),
+            )
+        return permission_id
+
+    def list_namespace_permissions(
+        self,
+        *,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        namespace: Optional[str] = None,
+        include_expired: bool = False,
+    ) -> List[Dict[str, Any]]:
+        query = """
+            SELECT p.*, n.name AS namespace_name
+            FROM namespace_permissions p
+            JOIN namespaces n ON n.id = p.namespace_id
+            WHERE 1=1
+        """
+        params: List[Any] = []
+        if user_id:
+            query += " AND p.user_id = ?"
+            params.append(user_id)
+        if agent_id:
+            query += " AND p.agent_id = ?"
+            params.append(agent_id)
+        if namespace:
+            query += " AND n.name = ?"
+            params.append(namespace)
+        if not include_expired:
+            query += " AND (p.expires_at IS NULL OR p.expires_at > ?)"
+            params.append(datetime.utcnow().isoformat())
+        query += " ORDER BY p.granted_at DESC"
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def get_agent_allowed_namespaces(self, user_id: str, agent_id: Optional[str], capability: str = "read") -> List[str]:
+        # User-local or missing agent context falls back to default namespace.
+        if not agent_id:
+            return ["default"]
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT n.name AS namespace_name
+                FROM namespace_permissions p
+                JOIN namespaces n ON n.id = p.namespace_id
+                WHERE p.user_id = ?
+                  AND p.agent_id IN (?, '*')
+                  AND p.capability IN (?, '*')
+                  AND (p.expires_at IS NULL OR p.expires_at > ?)
+                """,
+                (user_id, agent_id, capability, datetime.utcnow().isoformat()),
+            ).fetchall()
+        namespaces = [str(row["namespace_name"]) for row in rows if row["namespace_name"]]
+        if "default" not in namespaces:
+            namespaces.append("default")
+        return sorted(set(namespaces))
+
+    # =========================================================================
+    # v2 Agent policy methods
+    # =========================================================================
+
+    def upsert_agent_policy(
+        self,
+        *,
+        user_id: str,
+        agent_id: str,
+        allowed_confidentiality_scopes: Optional[List[str]] = None,
+        allowed_capabilities: Optional[List[str]] = None,
+        allowed_namespaces: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        policy_id = str(uuid.uuid4())
+        scopes = sorted({
+            str(scope).strip().lower()
+            for scope in (allowed_confidentiality_scopes or [])
+            if str(scope).strip()
+        })
+        capabilities = sorted({
+            str(capability).strip().lower()
+            for capability in (allowed_capabilities or [])
+            if str(capability).strip()
+        })
+        namespaces = sorted({
+            str(namespace).strip()
+            for namespace in (allowed_namespaces or [])
+            if str(namespace).strip()
+        })
+        now_iso = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO agent_policies (
+                    id,
+                    user_id,
+                    agent_id,
+                    allowed_confidentiality_scopes,
+                    allowed_capabilities,
+                    allowed_namespaces,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, agent_id) DO UPDATE SET
+                    allowed_confidentiality_scopes=excluded.allowed_confidentiality_scopes,
+                    allowed_capabilities=excluded.allowed_capabilities,
+                    allowed_namespaces=excluded.allowed_namespaces,
+                    updated_at=excluded.updated_at
+                """,
+                (
+                    policy_id,
+                    user_id,
+                    agent_id,
+                    json.dumps(scopes),
+                    json.dumps(capabilities),
+                    json.dumps(namespaces),
+                    now_iso,
+                    now_iso,
+                ),
+            )
+        policy = self.get_agent_policy(user_id=user_id, agent_id=agent_id, include_wildcard=False)
+        return policy or {
+            "id": policy_id,
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "allowed_confidentiality_scopes": scopes,
+            "allowed_capabilities": capabilities,
+            "allowed_namespaces": namespaces,
+        }
+
+    def get_agent_policy(
+        self,
+        *,
+        user_id: str,
+        agent_id: str,
+        include_wildcard: bool = True,
+    ) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            if include_wildcard:
+                row = conn.execute(
+                    """
+                    SELECT *,
+                           CASE WHEN agent_id = ? THEN 0 ELSE 1 END AS _priority
+                    FROM agent_policies
+                    WHERE user_id = ?
+                      AND agent_id IN (?, '*')
+                    ORDER BY _priority ASC
+                    LIMIT 1
+                    """,
+                    (agent_id, user_id, agent_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    """
+                    SELECT * FROM agent_policies
+                    WHERE user_id = ? AND agent_id = ?
+                    LIMIT 1
+                    """,
+                    (user_id, agent_id),
+                ).fetchone()
+
+        if not row:
+            return None
+
+        data = dict(row)
+        data["allowed_confidentiality_scopes"] = self._parse_json_value(data.get("allowed_confidentiality_scopes"), [])
+        data["allowed_capabilities"] = self._parse_json_value(data.get("allowed_capabilities"), [])
+        data["allowed_namespaces"] = self._parse_json_value(data.get("allowed_namespaces"), [])
+        if include_wildcard:
+            data["policy_scope"] = "exact" if data.get("agent_id") == agent_id else "wildcard"
+        data.pop("_priority", None)
+        return data
+
+    def list_agent_policies(self, *, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM agent_policies WHERE 1=1"
+        params: List[Any] = []
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
+        query += " ORDER BY user_id ASC, agent_id ASC"
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+
+        policies: List[Dict[str, Any]] = []
+        for row in rows:
+            data = dict(row)
+            data["allowed_confidentiality_scopes"] = self._parse_json_value(data.get("allowed_confidentiality_scopes"), [])
+            data["allowed_capabilities"] = self._parse_json_value(data.get("allowed_capabilities"), [])
+            data["allowed_namespaces"] = self._parse_json_value(data.get("allowed_namespaces"), [])
+            policies.append(data)
+        return policies
+
+    def delete_agent_policy(self, *, user_id: str, agent_id: str) -> bool:
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                """
+                DELETE FROM agent_policies
+                WHERE user_id = ? AND agent_id = ?
+                """,
+                (user_id, agent_id),
+            )
+        return cursor.rowcount > 0
+
+    def list_user_ids(self) -> List[str]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT DISTINCT user_id FROM (
+                    SELECT user_id FROM memories
+                    UNION ALL
+                    SELECT user_id FROM sessions
+                    UNION ALL
+                    SELECT user_id FROM proposal_commits
+                )
+                WHERE user_id IS NOT NULL AND user_id != ''
+                ORDER BY user_id
+                """
+            ).fetchall()
+        return [str(row["user_id"]) for row in rows if row["user_id"]]
+
+    # =========================================================================
+    # v2 Invariant methods
+    # =========================================================================
+
+    def upsert_invariant(
+        self,
+        user_id: str,
+        invariant_key: str,
+        invariant_value: str,
+        category: str = "identity",
+        confidence: float = 0.7,
+        source_memory_id: Optional[str] = None,
+    ) -> str:
+        invariant_id = str(uuid.uuid4())
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO invariants (
+                    id, user_id, invariant_key, invariant_value, category, confidence, source_memory_id
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(user_id, invariant_key) DO UPDATE SET
+                    invariant_value=excluded.invariant_value,
+                    category=excluded.category,
+                    confidence=excluded.confidence,
+                    source_memory_id=excluded.source_memory_id,
+                    updated_at=CURRENT_TIMESTAMP
+                """,
+                (
+                    invariant_id,
+                    user_id,
+                    invariant_key,
+                    invariant_value,
+                    category,
+                    confidence,
+                    source_memory_id,
+                ),
+            )
+        return invariant_id
+
+    def get_invariant(self, user_id: str, invariant_key: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM invariants
+                WHERE user_id = ? AND invariant_key = ?
+                """,
+                (user_id, invariant_key),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def list_invariants(self, user_id: str) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM invariants
+                WHERE user_id = ?
+                ORDER BY confidence DESC, updated_at DESC
+                """,
+                (user_id,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # =========================================================================
+    # Dashboard / Visualization methods
+    # =========================================================================
+
+    def get_constellation_data(self, user_id: Optional[str] = None, limit: int = 200) -> Dict[str, Any]:
+        """Build graph data for the constellation visualizer."""
+        with self._get_connection() as conn:
+            # Nodes: memories
+            mem_query = "SELECT id, memory, strength, layer, categories, created_at FROM memories WHERE tombstone = 0"
+            params: List[Any] = []
+            if user_id:
+                mem_query += " AND user_id = ?"
+                params.append(user_id)
+            mem_query += " ORDER BY strength DESC LIMIT ?"
+            params.append(limit)
+            mem_rows = conn.execute(mem_query, params).fetchall()
+
+            nodes = []
+            node_ids = set()
+            for row in mem_rows:
+                cats = row["categories"]
+                if cats:
+                    try:
+                        cats = json.loads(cats)
+                    except Exception:
+                        cats = []
+                else:
+                    cats = []
+                nodes.append({
+                    "id": row["id"],
+                    "memory": (row["memory"] or "")[:120],
+                    "strength": row["strength"],
+                    "layer": row["layer"],
+                    "categories": cats,
+                    "created_at": row["created_at"],
+                })
+                node_ids.add(row["id"])
+
+            # Edges from scene_memories (memories sharing a scene)
+            edges: List[Dict[str, Any]] = []
+            if node_ids:
+                placeholders = ",".join("?" for _ in node_ids)
+                scene_rows = conn.execute(
+                    f"""
+                    SELECT a.memory_id AS source, b.memory_id AS target, a.scene_id
+                    FROM scene_memories a
+                    JOIN scene_memories b ON a.scene_id = b.scene_id AND a.memory_id < b.memory_id
+                    WHERE a.memory_id IN ({placeholders}) AND b.memory_id IN ({placeholders})
+                    """,
+                    list(node_ids) + list(node_ids),
+                ).fetchall()
+                for row in scene_rows:
+                    edges.append({"source": row["source"], "target": row["target"], "type": "scene"})
+
+                # Edges from profile_memories (memories sharing a profile)
+                profile_rows = conn.execute(
+                    f"""
+                    SELECT a.memory_id AS source, b.memory_id AS target, a.profile_id
+                    FROM profile_memories a
+                    JOIN profile_memories b ON a.profile_id = b.profile_id AND a.memory_id < b.memory_id
+                    WHERE a.memory_id IN ({placeholders}) AND b.memory_id IN ({placeholders})
+                    """,
+                    list(node_ids) + list(node_ids),
+                ).fetchall()
+                for row in profile_rows:
+                    edges.append({"source": row["source"], "target": row["target"], "type": "profile"})
+
+        return {"nodes": nodes, "edges": edges}
+
+    def get_decay_log_entries(self, limit: int = 20) -> List[Dict[str, Any]]:
+        """Return recent decay log entries for the dashboard sparkline."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                "SELECT * FROM decay_log ORDER BY run_at DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    # =========================================================================
+    # Utilities
+    # =========================================================================
+
+    @staticmethod
+    def _parse_json_value(value: Any, default: Any) -> Any:
+        if value is None:
+            return default
+        if isinstance(value, (dict, list)):
+            return value
+        try:
+            return json.loads(value)
+        except Exception:
+            return default

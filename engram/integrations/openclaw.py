@@ -37,16 +37,32 @@ You have access to a persistent memory store backed by the Engram API at
 
 | Action | Method | Endpoint | Key fields |
 |--------|--------|----------|------------|
-| Search | POST | /v1/search | `query`, `limit` |
-| Store  | POST | /v1/memories | `content`, `source_app`, `infer` |
+| Session | POST | /v1/sessions | `user_id`, `agent_id`, `allowed_confidentiality_scopes` |
+| Search | POST | /v1/search | `query`, `user_id`, `agent_id`, `limit` |
+| Store  | POST | /v1/memories | `content`, `mode`, `scope`, `source_app` |
 | Health | GET  | /health | — |
 
 ---
 
 ## Rules
 
-### 1 – Search at the start of every user message
-Before you begin composing a reply, silently POST to
+### 1 – Create session token, then search each user message
+Before the first memory call in a session, create a capability token via
+`{engram_api_url}/v1/sessions` and include it in all subsequent requests:
+`Authorization: Bearer <token>`.
+
+Session request body:
+```json
+{{
+  "user_id": "default",
+  "agent_id": "openclaw",
+  "allowed_confidentiality_scopes": ["work", "personal", "finance", "health", "private"],
+  "capabilities": ["search", "propose_write"],
+  "ttl_minutes": 1440
+}}
+```
+
+Then before composing a reply, silently POST to
 `{engram_api_url}/v1/search` with a `query` derived from the user's
 message.  Inject any returned snippets into your reasoning context.
 Do **not** surface the raw search payload to the user.
@@ -55,6 +71,8 @@ Example request body:
 ```json
 {{
   "query": "<short summary of user intent>",
+  "user_id": "default",
+  "agent_id": "openclaw",
   "limit": 5
 }}
 ```
@@ -70,6 +88,10 @@ Always tag the memory so it is filterable:
 ```json
 {{
   "content": "<what was learned>",
+  "mode": "staging",
+  "scope": "work",
+  "user_id": "default",
+  "agent_id": "openclaw",
   "source_app": "openclaw",
   "infer": false,
   "categories": ["<relevant-category>"]

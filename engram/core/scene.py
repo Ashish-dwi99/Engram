@@ -162,6 +162,7 @@ class SceneProcessor:
         location: Optional[str] = None,
         participants: Optional[List[str]] = None,
         embedding: Optional[List[float]] = None,
+        namespace: str = "default",
     ) -> Dict[str, Any]:
         """Create a new scene and add the first memory to it."""
         scene_id = str(uuid.uuid4())
@@ -177,6 +178,7 @@ class SceneProcessor:
             "end_time": None,
             "embedding": embedding,
             "strength": 1.0,
+            "namespace": namespace,
         }
         self.db.add_scene(scene_data)
         self.db.add_scene_memory(scene_id, first_memory_id, position=0)
@@ -192,6 +194,7 @@ class SceneProcessor:
         memory_id: str,
         embedding: Optional[List[float]] = None,
         timestamp: Optional[str] = None,
+        namespace: Optional[str] = None,
     ) -> None:
         """Append a memory to an existing scene."""
         scene = self.db.get_scene(scene_id)
@@ -205,6 +208,8 @@ class SceneProcessor:
         updates: Dict[str, Any] = {"memory_ids": memory_ids}
         if timestamp:
             updates["end_time"] = timestamp
+        if namespace:
+            updates["namespace"] = namespace
 
         # Running average of embeddings
         if embedding and scene.get("embedding"):

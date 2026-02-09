@@ -4,17 +4,17 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engram"
-version = "0.1.0"
-description = "Engram: Biologically-inspired memory layer for AI agents with forgetting, echo encoding, and dynamic categories"
+version = "0.4.0"
+description = "Memory layer for AI agents — biologically-inspired forgetting, multi-agent trust, and plug-and-play integrations"
 readme = "README.md"
 requires-python = ">=3.9"
 license = {text = "MIT"}
 authors = [
     {name = "Engram Team"}
 ]
-keywords = ["memory", "ai", "agents", "forgetting", "llm", "echo", "categories"]
+keywords = ["memory-layer", "mcp", "claude", "cursor", "codex", "ai", "agents", "forgetting", "llm"]
 classifiers = [
-    "Development Status :: 3 - Alpha",
+    "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
@@ -72,6 +72,8 @@ engram-api = "engram.api.server:run"
 Homepage = "https://github.com/Ashish-dwi99/Engram"
 Repository = "https://github.com/Ashish-dwi99/Engram"
 Issues = "https://github.com/Ashish-dwi99/Engram/issues"
+Documentation = "https://github.com/Ashish-dwi99/Engram#readme"
+Changelog = "https://github.com/Ashish-dwi99/Engram/blob/main/CHANGELOG.md"
 
 [tool.setuptools.packages.find]
 where = ["."]
