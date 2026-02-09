@@ -93,6 +93,27 @@ class CategoryMemConfig(BaseModel):
     auto_create_subcategories: bool = True  # Allow dynamic subcategory creation
 
 
+class SceneConfig(BaseModel):
+    """Configuration for episodic scene grouping."""
+    enable_scenes: bool = True
+    scene_time_gap_minutes: int = 30       # gap > this = new scene
+    scene_topic_threshold: float = 0.55    # cosine sim below this = topic shift
+    auto_close_inactive_minutes: int = 120
+    max_scene_memories: int = 50
+    use_llm_summarization: bool = True
+    summary_regenerate_threshold: int = 5
+
+
+class ProfileConfig(BaseModel):
+    """Configuration for character profile tracking."""
+    enable_profiles: bool = True
+    auto_detect_profiles: bool = True
+    use_llm_extraction: bool = True
+    narrative_regenerate_threshold: int = 10
+    self_profile_auto_create: bool = True
+    max_facts_per_profile: int = 100
+
+
 class ScopeConfig(BaseModel):
     """Configuration for scope-aware sharing weights."""
     agent_weight: float = 1.0
@@ -137,3 +158,5 @@ class MemoryConfig(BaseModel):
     category: CategoryMemConfig = Field(default_factory=CategoryMemConfig)
     scope: ScopeConfig = Field(default_factory=ScopeConfig)
     graph: KnowledgeGraphConfig = Field(default_factory=lambda: KnowledgeGraphConfig())
+    scene: SceneConfig = Field(default_factory=SceneConfig)
+    profile: ProfileConfig = Field(default_factory=ProfileConfig)

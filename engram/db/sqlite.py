@@ -94,8 +94,74 @@ class SQLiteManager:
                 CREATE INDEX IF NOT EXISTS idx_category_type ON categories(category_type);
                 CREATE INDEX IF NOT EXISTS idx_category_parent ON categories(parent_id);
                 CREATE INDEX IF NOT EXISTS idx_category_strength ON categories(strength DESC);
+
+                -- Episodic scenes
+                CREATE TABLE IF NOT EXISTS scenes (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    title TEXT,
+                    summary TEXT,
+                    topic TEXT,
+                    location TEXT,
+                    participants TEXT DEFAULT '[]',
+                    memory_ids TEXT DEFAULT '[]',
+                    start_time TEXT,
+                    end_time TEXT,
+                    embedding TEXT,
+                    strength REAL DEFAULT 1.0,
+                    access_count INTEGER DEFAULT 0,
+                    tombstone INTEGER DEFAULT 0
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_scene_user ON scenes(user_id);
+                CREATE INDEX IF NOT EXISTS idx_scene_start ON scenes(start_time DESC);
+
+                -- Scene-Memory junction
+                CREATE TABLE IF NOT EXISTS scene_memories (
+                    scene_id TEXT NOT NULL,
+                    memory_id TEXT NOT NULL,
+                    position INTEGER DEFAULT 0,
+                    PRIMARY KEY (scene_id, memory_id),
+                    FOREIGN KEY (scene_id) REFERENCES scenes(id),
+                    FOREIGN KEY (memory_id) REFERENCES memories(id)
+                );
+
+                -- Character profiles
+                CREATE TABLE IF NOT EXISTS profiles (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT,
+                    name TEXT NOT NULL,
+                    profile_type TEXT DEFAULT 'contact' CHECK (profile_type IN ('self', 'contact', 'entity')),
+                    narrative TEXT,
+                    facts TEXT DEFAULT '[]',
+                    preferences TEXT DEFAULT '[]',
+                    relationships TEXT DEFAULT '[]',
+                    sentiment TEXT,
+                    theory_of_mind TEXT DEFAULT '{}',
+                    aliases TEXT DEFAULT '[]',
+                    embedding TEXT,
+                    strength REAL DEFAULT 1.0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+
+                CREATE INDEX IF NOT EXISTS idx_profile_user ON profiles(user_id);
+                CREATE INDEX IF NOT EXISTS idx_profile_name ON profiles(name);
+                CREATE INDEX IF NOT EXISTS idx_profile_type ON profiles(profile_type);
+
+                -- Profile-Memory junction
+                CREATE TABLE IF NOT EXISTS profile_memories (
+                    profile_id TEXT NOT NULL,
+                    memory_id TEXT NOT NULL,
+                    role TEXT DEFAULT 'mentioned' CHECK (role IN ('subject', 'mentioned', 'about')),
+                    PRIMARY KEY (profile_id, memory_id),
+                    FOREIGN KEY (profile_id) REFERENCES profiles(id),
+                    FOREIGN KEY (memory_id) REFERENCES memories(id)
+                );
                 """
             )
+            # Migration: add scene_id column to memories if missing
+            self._migrate_add_column("memories", "scene_id", "TEXT")
 
     @contextmanager
     def _get_connection(self):
@@ -390,6 +456,271 @@ class SQLiteManager:
                 data[key] = json.loads(data[key])
             else:
                 data[key] = []
+        if data.get("embedding"):
+            data["embedding"] = json.loads(data["embedding"])
+        return data
+
+    def _migrate_add_column(self, table: str, column: str, col_type: str) -> None:
+        """Add a column to an existing table if it doesn't already exist."""
+        try:
+            with self._get_connection() as conn:
+                conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+        except sqlite3.OperationalError:
+            pass  # Column already exists
+
+    # =========================================================================
+    # Scene methods
+    # =========================================================================
+
+    def add_scene(self, scene_data: Dict[str, Any]) -> str:
+        scene_id = scene_data.get("id", str(uuid.uuid4()))
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO scenes (
+                    id, user_id, title, summary, topic, location,
+                    participants, memory_ids, start_time, end_time,
+                    embedding, strength, access_count, tombstone
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    scene_id,
+                    scene_data.get("user_id"),
+                    scene_data.get("title"),
+                    scene_data.get("summary"),
+                    scene_data.get("topic"),
+                    scene_data.get("location"),
+                    json.dumps(scene_data.get("participants", [])),
+                    json.dumps(scene_data.get("memory_ids", [])),
+                    scene_data.get("start_time"),
+                    scene_data.get("end_time"),
+                    json.dumps(scene_data.get("embedding")) if scene_data.get("embedding") else None,
+                    scene_data.get("strength", 1.0),
+                    scene_data.get("access_count", 0),
+                    1 if scene_data.get("tombstone", False) else 0,
+                ),
+            )
+        return scene_id
+
+    def get_scene(self, scene_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM scenes WHERE id = ? AND tombstone = 0", (scene_id,)
+            ).fetchone()
+            if row:
+                return self._scene_row_to_dict(row)
+        return None
+
+    def update_scene(self, scene_id: str, updates: Dict[str, Any]) -> bool:
+        set_clauses = []
+        params: List[Any] = []
+        for key, value in updates.items():
+            if key in {"participants", "memory_ids", "embedding"}:
+                value = json.dumps(value)
+            set_clauses.append(f"{key} = ?")
+            params.append(value)
+        if not set_clauses:
+            return False
+        params.append(scene_id)
+        with self._get_connection() as conn:
+            conn.execute(
+                f"UPDATE scenes SET {', '.join(set_clauses)} WHERE id = ?",
+                params,
+            )
+        return True
+
+    def get_open_scene(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """Get the most recent scene without an end_time for a user."""
+        with self._get_connection() as conn:
+            row = conn.execute(
+                """
+                SELECT * FROM scenes
+                WHERE user_id = ? AND end_time IS NULL AND tombstone = 0
+                ORDER BY start_time DESC LIMIT 1
+                """,
+                (user_id,),
+            ).fetchone()
+            if row:
+                return self._scene_row_to_dict(row)
+        return None
+
+    def get_scenes(
+        self,
+        user_id: Optional[str] = None,
+        topic: Optional[str] = None,
+        start_after: Optional[str] = None,
+        start_before: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM scenes WHERE tombstone = 0"
+        params: List[Any] = []
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
+        if topic:
+            query += " AND topic LIKE ?"
+            params.append(f"%{topic}%")
+        if start_after:
+            query += " AND start_time >= ?"
+            params.append(start_after)
+        if start_before:
+            query += " AND start_time <= ?"
+            params.append(start_before)
+        query += " ORDER BY start_time DESC LIMIT ?"
+        params.append(limit)
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [self._scene_row_to_dict(row) for row in rows]
+
+    def add_scene_memory(self, scene_id: str, memory_id: str, position: int = 0) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO scene_memories (scene_id, memory_id, position) VALUES (?, ?, ?)",
+                (scene_id, memory_id, position),
+            )
+
+    def get_scene_memories(self, scene_id: str) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT m.* FROM memories m
+                JOIN scene_memories sm ON m.id = sm.memory_id
+                WHERE sm.scene_id = ? AND m.tombstone = 0
+                ORDER BY sm.position
+                """,
+                (scene_id,),
+            ).fetchall()
+            return [self._row_to_dict(row) for row in rows]
+
+    def _scene_row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        data = dict(row)
+        for key in ["participants", "memory_ids"]:
+            if key in data and data[key]:
+                data[key] = json.loads(data[key])
+            else:
+                data[key] = []
+        if data.get("embedding"):
+            data["embedding"] = json.loads(data["embedding"])
+        data["tombstone"] = bool(data.get("tombstone", 0))
+        return data
+
+    # =========================================================================
+    # Profile methods
+    # =========================================================================
+
+    def add_profile(self, profile_data: Dict[str, Any]) -> str:
+        profile_id = profile_data.get("id", str(uuid.uuid4()))
+        now = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO profiles (
+                    id, user_id, name, profile_type, narrative,
+                    facts, preferences, relationships, sentiment,
+                    theory_of_mind, aliases, embedding, strength,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    profile_id,
+                    profile_data.get("user_id"),
+                    profile_data.get("name", ""),
+                    profile_data.get("profile_type", "contact"),
+                    profile_data.get("narrative"),
+                    json.dumps(profile_data.get("facts", [])),
+                    json.dumps(profile_data.get("preferences", [])),
+                    json.dumps(profile_data.get("relationships", [])),
+                    profile_data.get("sentiment"),
+                    json.dumps(profile_data.get("theory_of_mind", {})),
+                    json.dumps(profile_data.get("aliases", [])),
+                    json.dumps(profile_data.get("embedding")) if profile_data.get("embedding") else None,
+                    profile_data.get("strength", 1.0),
+                    profile_data.get("created_at", now),
+                    profile_data.get("updated_at", now),
+                ),
+            )
+        return profile_id
+
+    def get_profile(self, profile_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM profiles WHERE id = ?", (profile_id,)
+            ).fetchone()
+            if row:
+                return self._profile_row_to_dict(row)
+        return None
+
+    def update_profile(self, profile_id: str, updates: Dict[str, Any]) -> bool:
+        set_clauses = []
+        params: List[Any] = []
+        for key, value in updates.items():
+            if key in {"facts", "preferences", "relationships", "aliases", "theory_of_mind", "embedding"}:
+                value = json.dumps(value)
+            set_clauses.append(f"{key} = ?")
+            params.append(value)
+        set_clauses.append("updated_at = ?")
+        params.append(datetime.utcnow().isoformat())
+        params.append(profile_id)
+        with self._get_connection() as conn:
+            conn.execute(
+                f"UPDATE profiles SET {', '.join(set_clauses)} WHERE id = ?",
+                params,
+            )
+        return True
+
+    def get_all_profiles(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM profiles"
+        params: List[Any] = []
+        if user_id:
+            query += " WHERE user_id = ?"
+            params.append(user_id)
+        query += " ORDER BY strength DESC"
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [self._profile_row_to_dict(row) for row in rows]
+
+    def get_profile_by_name(self, name: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Find a profile by exact name or alias match."""
+        profiles = self.get_all_profiles(user_id=user_id)
+        name_lower = name.lower()
+        for p in profiles:
+            if p["name"].lower() == name_lower:
+                return p
+            if name_lower in [a.lower() for a in p.get("aliases", [])]:
+                return p
+        return None
+
+    def add_profile_memory(self, profile_id: str, memory_id: str, role: str = "mentioned") -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO profile_memories (profile_id, memory_id, role) VALUES (?, ?, ?)",
+                (profile_id, memory_id, role),
+            )
+
+    def get_profile_memories(self, profile_id: str) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT m.*, pm.role AS profile_role FROM memories m
+                JOIN profile_memories pm ON m.id = pm.memory_id
+                WHERE pm.profile_id = ? AND m.tombstone = 0
+                ORDER BY m.created_at DESC
+                """,
+                (profile_id,),
+            ).fetchall()
+            return [self._row_to_dict(row) for row in rows]
+
+    def _profile_row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        data = dict(row)
+        for key in ["facts", "preferences", "relationships", "aliases"]:
+            if key in data and data[key]:
+                data[key] = json.loads(data[key])
+            else:
+                data[key] = []
+        if data.get("theory_of_mind"):
+            data["theory_of_mind"] = json.loads(data["theory_of_mind"])
+        else:
+            data["theory_of_mind"] = {}
         if data.get("embedding"):
             data["embedding"] = json.loads(data["embedding"])
         return data

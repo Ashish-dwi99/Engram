@@ -21,6 +21,8 @@ from engram.core.fusion import fuse_memories
 from engram.core.retrieval import composite_score, tokenize, HybridSearcher
 from engram.core.category import CategoryProcessor, CategoryMatch
 from engram.core.graph import KnowledgeGraph
+from engram.core.scene import SceneProcessor
+from engram.core.profile import ProfileProcessor
 from engram.db.sqlite import SQLiteManager
 from engram.exceptions import FadeMemValidationError
 from engram.memory.base import MemoryBase
@@ -127,6 +129,43 @@ class Memory(MemoryBase):
             )
         else:
             self.knowledge_graph = None
+
+        # Initialize SceneProcessor
+        self.scene_config = self.config.scene
+        if self.scene_config.enable_scenes:
+            self.scene_processor = SceneProcessor(
+                db=self.db,
+                embedder=self.embedder,
+                llm=self.llm,
+                config={
+                    "scene_time_gap_minutes": self.scene_config.scene_time_gap_minutes,
+                    "scene_topic_threshold": self.scene_config.scene_topic_threshold,
+                    "auto_close_inactive_minutes": self.scene_config.auto_close_inactive_minutes,
+                    "max_scene_memories": self.scene_config.max_scene_memories,
+                    "use_llm_summarization": self.scene_config.use_llm_summarization,
+                    "summary_regenerate_threshold": self.scene_config.summary_regenerate_threshold,
+                },
+            )
+        else:
+            self.scene_processor = None
+
+        # Initialize ProfileProcessor
+        self.profile_config = self.config.profile
+        if self.profile_config.enable_profiles:
+            self.profile_processor = ProfileProcessor(
+                db=self.db,
+                embedder=self.embedder,
+                llm=self.llm,
+                config={
+                    "auto_detect_profiles": self.profile_config.auto_detect_profiles,
+                    "use_llm_extraction": self.profile_config.use_llm_extraction,
+                    "narrative_regenerate_threshold": self.profile_config.narrative_regenerate_threshold,
+                    "self_profile_auto_create": self.profile_config.self_profile_auto_create,
+                    "max_facts_per_profile": self.profile_config.max_facts_per_profile,
+                },
+            )
+        else:
+            self.profile_processor = None
 
     @classmethod
     def from_config(cls, config_dict: Dict[str, Any]):
@@ -452,6 +491,20 @@ class Memory(MemoryBase):
                 )
                 if self.graph_config.auto_link_entities:
                     self.knowledge_graph.link_by_shared_entities(memory_id)
+
+            # SceneProcessor: Assign memory to a scene
+            if self.scene_processor:
+                try:
+                    self._assign_to_scene(memory_id, content, embedding, user_id, now)
+                except Exception as e:
+                    logger.warning(f"Scene assignment failed for {memory_id}: {e}")
+
+            # ProfileProcessor: Update profiles from content
+            if self.profile_processor:
+                try:
+                    self._update_profiles(memory_id, content, mem_metadata, user_id)
+                except Exception as e:
+                    logger.warning(f"Profile update failed for {memory_id}: {e}")
 
             results.append(
                 {
@@ -1763,3 +1816,147 @@ class Memory(MemoryBase):
         stats = self.knowledge_graph.stats()
         stats["enabled"] = True
         return stats
+
+    # =========================================================================
+    # Scene Methods
+    # =========================================================================
+
+    def _assign_to_scene(
+        self,
+        memory_id: str,
+        content: str,
+        embedding: Optional[List[float]],
+        user_id: Optional[str],
+        timestamp: str,
+    ) -> None:
+        """Assign a memory to an existing or new scene."""
+        if not self.scene_processor or not user_id:
+            return
+
+        # Auto-close stale scenes first
+        self.scene_processor.auto_close_stale(user_id)
+
+        current_scene = self.db.get_open_scene(user_id)
+        detection = self.scene_processor.detect_boundary(
+            content=content,
+            timestamp=timestamp,
+            current_scene=current_scene,
+            embedding=embedding,
+        )
+
+        if detection.is_new_scene:
+            # Close old scene if open
+            if current_scene:
+                self.scene_processor.close_scene(current_scene["id"], timestamp)
+
+            # Detect topic from content (first 60 chars as fallback)
+            topic = content[:60].strip()
+            location = detection.detected_location
+
+            self.scene_processor.create_scene(
+                first_memory_id=memory_id,
+                user_id=user_id,
+                timestamp=timestamp,
+                topic=topic,
+                location=location,
+                embedding=embedding,
+            )
+        else:
+            if current_scene:
+                self.scene_processor.add_memory_to_scene(
+                    scene_id=current_scene["id"],
+                    memory_id=memory_id,
+                    embedding=embedding,
+                    timestamp=timestamp,
+                )
+
+    def _update_profiles(
+        self,
+        memory_id: str,
+        content: str,
+        metadata: Dict[str, Any],
+        user_id: Optional[str],
+    ) -> None:
+        """Extract and apply profile updates from memory content."""
+        if not self.profile_processor or not user_id:
+            return
+
+        updates = self.profile_processor.extract_profile_mentions(
+            content=content,
+            metadata=metadata,
+            user_id=user_id,
+        )
+
+        for update in updates:
+            self.profile_processor.apply_update(
+                profile_update=update,
+                memory_id=memory_id,
+                user_id=user_id,
+            )
+
+    def get_scene(self, scene_id: str) -> Optional[Dict[str, Any]]:
+        """Get a specific scene by ID."""
+        return self.db.get_scene(scene_id)
+
+    def get_scenes(
+        self,
+        user_id: Optional[str] = None,
+        topic: Optional[str] = None,
+        start_after: Optional[str] = None,
+        start_before: Optional[str] = None,
+        limit: int = 50,
+    ) -> List[Dict[str, Any]]:
+        """List scenes chronologically."""
+        return self.db.get_scenes(
+            user_id=user_id,
+            topic=topic,
+            start_after=start_after,
+            start_before=start_before,
+            limit=limit,
+        )
+
+    def search_scenes(self, query: str, user_id: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
+        """Semantic search over scene summaries."""
+        if not self.scene_processor:
+            return []
+        return self.scene_processor.search_scenes(query=query, user_id=user_id, limit=limit)
+
+    def get_scene_timeline(self, user_id: str, limit: int = 20) -> List[Dict[str, Any]]:
+        """Get scenes in chronological order."""
+        if not self.scene_processor:
+            return []
+        return self.scene_processor.get_scene_timeline(user_id=user_id, limit=limit)
+
+    def get_scene_memories(self, scene_id: str) -> List[Dict[str, Any]]:
+        """Get all memories in a scene."""
+        return self.db.get_scene_memories(scene_id)
+
+    # =========================================================================
+    # Profile Methods
+    # =========================================================================
+
+    def get_profile(self, profile_id: str) -> Optional[Dict[str, Any]]:
+        """Get a character profile by ID."""
+        return self.db.get_profile(profile_id)
+
+    def get_all_profiles(self, user_id: Optional[str] = None) -> List[Dict[str, Any]]:
+        """List all profiles for a user."""
+        return self.db.get_all_profiles(user_id=user_id)
+
+    def get_self_profile(self, user_id: str) -> Optional[Dict[str, Any]]:
+        """Get the self-profile for a user."""
+        return self.db.get_profile_by_name("self", user_id=user_id)
+
+    def search_profiles(self, query: str, user_id: Optional[str] = None, limit: int = 10) -> List[Dict[str, Any]]:
+        """Search profiles by name or description."""
+        if not self.profile_processor:
+            return []
+        return self.profile_processor.search_profiles(query=query, user_id=user_id, limit=limit)
+
+    def update_profile(self, profile_id: str, updates: Dict[str, Any]) -> bool:
+        """Update a profile."""
+        return self.db.update_profile(profile_id, updates)
+
+    def get_profile_memories(self, profile_id: str) -> List[Dict[str, Any]]:
+        """Get memories linked to a profile."""
+        return self.db.get_profile_memories(profile_id)

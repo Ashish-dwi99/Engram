@@ -397,6 +397,122 @@ async def list_tools() -> List[Tool]:
                 "required": ["content"]
             }
         ),
+        # ---- Episodic Scene tools ----
+        Tool(
+            name="get_scene",
+            description="Get a specific episodic scene by ID. Returns the scene with its summary, topic, participants, and linked memory IDs.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "scene_id": {
+                        "type": "string",
+                        "description": "The ID of the scene to retrieve"
+                    }
+                },
+                "required": ["scene_id"]
+            }
+        ),
+        Tool(
+            name="list_scenes",
+            description="List episodic scenes chronologically. Filter by user, topic, or time range.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "string",
+                        "description": "User identifier (default: 'default')"
+                    },
+                    "topic": {
+                        "type": "string",
+                        "description": "Filter scenes containing this topic keyword"
+                    },
+                    "start_after": {
+                        "type": "string",
+                        "description": "Only scenes starting after this ISO timestamp"
+                    },
+                    "start_before": {
+                        "type": "string",
+                        "description": "Only scenes starting before this ISO timestamp"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of scenes to return (default: 20)"
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="search_scenes",
+            description="Semantic search over episodic scene summaries. Use to find past episodes by topic or content.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query"
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": "User identifier (default: 'default')"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results (default: 10)"
+                    }
+                },
+                "required": ["query"]
+            }
+        ),
+        # ---- Character Profile tools ----
+        Tool(
+            name="get_profile",
+            description="Get a character profile by ID. Returns facts, preferences, relationships, and narrative for a person or entity.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "profile_id": {
+                        "type": "string",
+                        "description": "The ID of the profile to retrieve"
+                    }
+                },
+                "required": ["profile_id"]
+            }
+        ),
+        Tool(
+            name="list_profiles",
+            description="List all character profiles for a user. Includes self-profile, contacts, and entities.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "string",
+                        "description": "User identifier (default: 'default')"
+                    }
+                }
+            }
+        ),
+        Tool(
+            name="search_profiles",
+            description="Search character profiles by name or description. Finds people and entities mentioned in memories.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {
+                        "type": "string",
+                        "description": "The search query (name, fact, or description)"
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": "User identifier (default: 'default')"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of results (default: 10)"
+                    }
+                },
+                "required": ["query"]
+            }
+        ),
     ]
 
 
@@ -559,6 +675,110 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                 source_app="claude-code",
                 infer=False,
             )
+
+        # ---- Scene tools ----
+        elif name == "get_scene":
+            scene_id = arguments.get("scene_id", "")
+            scene = memory.get_scene(scene_id)
+            if scene:
+                scene.pop("embedding", None)
+                result = scene
+            else:
+                result = {"error": "Scene not found"}
+
+        elif name == "list_scenes":
+            user_id = arguments.get("user_id", "default")
+            scenes = memory.get_scenes(
+                user_id=user_id,
+                topic=arguments.get("topic"),
+                start_after=arguments.get("start_after"),
+                start_before=arguments.get("start_before"),
+                limit=arguments.get("limit", 20),
+            )
+            result = {
+                "scenes": [
+                    {
+                        "id": s["id"],
+                        "title": s.get("title"),
+                        "topic": s.get("topic"),
+                        "summary": s.get("summary"),
+                        "start_time": s.get("start_time"),
+                        "end_time": s.get("end_time"),
+                        "memory_count": len(s.get("memory_ids", [])),
+                    }
+                    for s in scenes
+                ],
+                "total": len(scenes),
+            }
+
+        elif name == "search_scenes":
+            query = arguments.get("query", "")
+            user_id = arguments.get("user_id", "default")
+            limit = arguments.get("limit", 10)
+            scenes = memory.search_scenes(query=query, user_id=user_id, limit=limit)
+            result = {
+                "scenes": [
+                    {
+                        "id": s["id"],
+                        "title": s.get("title"),
+                        "summary": s.get("summary"),
+                        "topic": s.get("topic"),
+                        "start_time": s.get("start_time"),
+                        "search_score": s.get("search_score"),
+                        "memory_count": len(s.get("memory_ids", [])),
+                    }
+                    for s in scenes
+                ],
+                "total": len(scenes),
+            }
+
+        # ---- Profile tools ----
+        elif name == "get_profile":
+            profile_id = arguments.get("profile_id", "")
+            profile = memory.get_profile(profile_id)
+            if profile:
+                profile.pop("embedding", None)
+                result = profile
+            else:
+                result = {"error": "Profile not found"}
+
+        elif name == "list_profiles":
+            user_id = arguments.get("user_id", "default")
+            profiles = memory.get_all_profiles(user_id=user_id)
+            result = {
+                "profiles": [
+                    {
+                        "id": p["id"],
+                        "name": p.get("name"),
+                        "profile_type": p.get("profile_type"),
+                        "narrative": p.get("narrative"),
+                        "fact_count": len(p.get("facts", [])),
+                        "preference_count": len(p.get("preferences", [])),
+                    }
+                    for p in profiles
+                ],
+                "total": len(profiles),
+            }
+
+        elif name == "search_profiles":
+            query = arguments.get("query", "")
+            user_id = arguments.get("user_id", "default")
+            limit = arguments.get("limit", 10)
+            profiles = memory.search_profiles(query=query, user_id=user_id, limit=limit)
+            result = {
+                "profiles": [
+                    {
+                        "id": p["id"],
+                        "name": p.get("name"),
+                        "profile_type": p.get("profile_type"),
+                        "narrative": p.get("narrative"),
+                        "facts": p.get("facts", [])[:5],
+                        "search_score": p.get("search_score"),
+                    }
+                    for p in profiles
+                ],
+                "total": len(profiles),
+            }
 
         else:
             result = {"error": f"Unknown tool: {name}"}
