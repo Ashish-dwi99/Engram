@@ -11,6 +11,8 @@ Usage:
     engram export           Export memories to JSON
     engram import file.json Import memories from JSON (Engram or Mem0 format)
     engram server           Start the REST API server
+    engram serve            Alias for server
+    engram status           Show version, config paths, and DB stats
 """
 
 from __future__ import annotations
@@ -255,6 +257,59 @@ def cmd_server(args):
     run()
 
 
+def cmd_status(args):
+    """Show version, config paths, installed integrations, and DB stats."""
+    import engram
+
+    print(f"Engram v{engram.__version__}")
+    print("=" * 40)
+
+    # Config paths
+    home = Path.home()
+    configs = {
+        "Claude Code": home / ".claude.json",
+        "Claude Desktop": home / "Library" / "Application Support" / "Claude" / "claude_desktop_config.json",
+        "Cursor": home / ".cursor" / "mcp.json",
+        "Codex": home / ".codex" / "config.toml",
+        "Plugin": home / ".engram" / "claude-plugin" / "engram-memory",
+    }
+
+    print("\nIntegrations:")
+    for name, path in configs.items():
+        installed = path.exists()
+        status = "installed" if installed else "not found"
+        print(f"  {name}: {status}")
+
+    # Data directory
+    data_dir = Path.home() / ".engram"
+    print(f"\nData directory: {data_dir}")
+
+    # DB stats
+    db_path = data_dir / "engram.db"
+    if db_path.exists():
+        size_mb = db_path.stat().st_size / (1024 * 1024)
+        print(f"Database: {db_path} ({size_mb:.1f} MB)")
+    else:
+        # Try default location
+        default_db = Path("engram.db")
+        if default_db.exists():
+            size_mb = default_db.stat().st_size / (1024 * 1024)
+            print(f"Database: {default_db} ({size_mb:.1f} MB)")
+        else:
+            print("Database: not found")
+
+    # Memory stats (if available)
+    try:
+        from engram import Engram
+        memory = Engram(in_memory=False)
+        stats = memory.stats()
+        print(f"\nMemories: {stats.get('total', 0)} total")
+        print(f"  Short-term (SML): {stats.get('sml_count', 0)}")
+        print(f"  Long-term (LML):  {stats.get('lml_count', 0)}")
+    except Exception:
+        pass
+
+
 def cmd_categories(args):
     """List categories."""
     from engram import Engram
@@ -287,7 +342,8 @@ Examples:
     engram server                     # Start REST API
         """,
     )
-    parser.add_argument("--version", action="version", version="%(prog)s 0.2.0")
+    from engram import __version__
+    parser.add_argument("--version", action="version", version=f"%(prog)s {__version__}")
 
     subparsers = parser.add_subparsers(dest="command", help="Available commands")
 
@@ -348,6 +404,16 @@ Examples:
     p_server.add_argument("--port", "-p", type=int, default=8100, help="Port")
     p_server.add_argument("--reload", action="store_true", help="Auto-reload on changes")
 
+    # Serve command (alias for server)
+    p_serve = subparsers.add_parser("serve", help="Start REST API server (alias for server)")
+    p_serve.add_argument("--host", default="127.0.0.1", help="Host to bind")
+    p_serve.add_argument("--port", "-p", type=int, default=8100, help="Port")
+    p_serve.add_argument("--reload", action="store_true", help="Auto-reload on changes")
+
+    # Status command
+    p_status = subparsers.add_parser("status", help="Show version, config paths, and DB stats")
+    p_status.add_argument("--json", "-j", action="store_true", help="Output as JSON")
+
     args = parser.parse_args()
 
     if args.command is None:
@@ -366,6 +432,8 @@ Examples:
         "import": cmd_import,
         "categories": cmd_categories,
         "server": cmd_server,
+        "serve": cmd_server,
+        "status": cmd_status,
     }
 
     handler = commands.get(args.command)

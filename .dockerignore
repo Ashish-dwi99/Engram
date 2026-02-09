@@ -1,0 +1,16 @@
+.venv
+.git
+__pycache__
+tests
+.claude
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+node_modules
+dist
+.pytest_cache
+.eggs
+*.egg-info
+.env
+.env.local

@@ -1,59 +1,46 @@
 #!/usr/bin/env python3
 """Engram UserPromptSubmit hook — stdlib-only proactive memory injector.
 
-Reads the user prompt from STDIN (or falls back to the USER_PROMPT env var),
-queries the running Engram API for relevant memories, and prints a JSON
-object with a ``systemMessage`` key that Claude Code will inject into context.
-
-Design constraints
-------------------
-* stdlib only — runs as a bare subprocess, no pip install
-* Phase 1: GET /health with 3 s timeout  – fast-fail if API is down
-* Phase 2: POST /v1/search with 6 s timeout
-* Query derivation is pure string ops (no LLM call)
-* Always exits 0; any failure prints ``{}``
+Reads the user prompt, ensures a capability token, queries Engram search,
+and emits a systemMessage for Claude Code context injection.
 """
 
 import json
 import os
 import sys
+from datetime import datetime, timedelta
+from pathlib import Path
 
 try:
     from urllib.request import Request, urlopen
-    from urllib.error import URLError
-except ImportError:  # pragma: no cover – safety net
+except ImportError:  # pragma: no cover
     sys.stdout.write("{}")
     sys.exit(0)
 
-# ---------------------------------------------------------------------------
-# Configuration (all env-overridable)
-# ---------------------------------------------------------------------------
 API_BASE = os.environ.get("ENGRAM_API_URL", "http://127.0.0.1:8100")
-HEALTH_TIMEOUT = 3   # seconds
-SEARCH_TIMEOUT = 6   # seconds
+HEALTH_TIMEOUT = 3
+SEARCH_TIMEOUT = 6
+SESSION_TIMEOUT = 4
 MAX_QUERY_CHARS = 120
 SENTINEL = "[Engram \u2014 relevant memories from previous sessions]"
 
+USER_ID = os.environ.get("ENGRAM_USER_ID", "default")
+AGENT_ID = os.environ.get("ENGRAM_AGENT_ID", "claude-code")
+TOKEN_CACHE = Path(os.environ.get("ENGRAM_TOKEN_CACHE", str(Path.home() / ".engram" / "session_token.json")))
+ADMIN_KEY = os.environ.get("ENGRAM_ADMIN_KEY", "").strip()
+
 
 def _derive_query(raw: str) -> str:
-    """Extract a short query from the raw user prompt (no LLM).
-
-    Takes the first sentence (split on .  !  ?) or the first MAX_QUERY_CHARS
-    characters, whichever is shorter.
-    """
     raw = raw.strip()
-    # Find the end of the first sentence
     for i, ch in enumerate(raw):
         if ch in ".!?" and i > 0:
             candidate = raw[: i + 1].strip()
             if candidate:
                 return candidate[:MAX_QUERY_CHARS]
-    # No sentence-ending punctuation found — just truncate
     return raw[:MAX_QUERY_CHARS]
 
 
 def _health_check() -> bool:
-    """GET /health — returns True if the API is reachable and healthy."""
     try:
         req = Request(f"{API_BASE}/health")
         resp = urlopen(req, timeout=HEALTH_TIMEOUT)
@@ -62,13 +49,102 @@ def _health_check() -> bool:
         return False
 
 
-def _search(query: str) -> list:
-    """POST /v1/search — returns the raw results list (may be empty)."""
-    payload = json.dumps({"query": query, "limit": 5}).encode("utf-8")
+def _parse_time(value: str):
+    try:
+        return datetime.fromisoformat(value)
+    except Exception:
+        return None
+
+
+def _read_cached_token() -> str:
+    if not TOKEN_CACHE.exists():
+        return ""
+    try:
+        data = json.loads(TOKEN_CACHE.read_text(encoding="utf-8"))
+        token = data.get("token", "")
+        expires_at = data.get("expires_at", "")
+        if not token or not expires_at:
+            return ""
+        exp = _parse_time(expires_at)
+        if exp is None:
+            return ""
+        if datetime.utcnow() + timedelta(minutes=2) >= exp:
+            return ""
+        return token
+    except Exception:
+        return ""
+
+
+def _write_cached_token(token: str, expires_at: str) -> None:
+    try:
+        TOKEN_CACHE.parent.mkdir(parents=True, exist_ok=True)
+        TOKEN_CACHE.write_text(
+            json.dumps({"token": token, "expires_at": expires_at}),
+            encoding="utf-8",
+        )
+    except Exception:
+        pass
+
+
+def _create_session_token() -> str:
+    payload = json.dumps(
+        {
+            "user_id": USER_ID,
+            "agent_id": AGENT_ID,
+            "allowed_confidentiality_scopes": ["work", "personal", "finance", "health", "private"],
+            "capabilities": ["search", "propose_write"],
+            "ttl_minutes": 24 * 60,
+        }
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if ADMIN_KEY:
+        headers["X-Engram-Admin-Key"] = ADMIN_KEY
+    req = Request(
+        f"{API_BASE}/v1/sessions",
+        data=payload,
+        headers=headers,
+        method="POST",
+    )
+    resp = urlopen(req, timeout=SESSION_TIMEOUT)
+    body = json.loads(resp.read().decode("utf-8"))
+    token = body.get("token", "")
+    expires_at = body.get("expires_at", "")
+    if token and expires_at:
+        _write_cached_token(token, expires_at)
+    return token
+
+
+def _get_token() -> str:
+    env_token = os.environ.get("ENGRAM_API_TOKEN", "").strip()
+    if env_token:
+        return env_token
+
+    cached = _read_cached_token()
+    if cached:
+        return cached
+
+    try:
+        return _create_session_token()
+    except Exception:
+        return ""
+
+
+def _search(query: str, token: str) -> list:
+    payload = json.dumps(
+        {
+            "query": query,
+            "limit": 5,
+            "user_id": USER_ID,
+            "agent_id": AGENT_ID,
+        }
+    ).encode("utf-8")
+    headers = {"Content-Type": "application/json"}
+    if token:
+        headers["Authorization"] = f"Bearer {token}"
     req = Request(
         f"{API_BASE}/v1/search",
         data=payload,
-        headers={"Content-Type": "application/json"},
+        headers=headers,
         method="POST",
     )
     resp = urlopen(req, timeout=SEARCH_TIMEOUT)
@@ -77,20 +153,16 @@ def _search(query: str) -> list:
 
 
 def _format_memories(results: list) -> str:
-    """Turn search results into the injected system-message block."""
     lines = [SENTINEL]
     for idx, mem in enumerate(results, 1):
         layer = mem.get("layer", "sml")
         score = mem.get("composite_score", mem.get("score", 0.0))
-        content = mem.get("memory", mem.get("content", "")).strip()
+        content = mem.get("memory", mem.get("content", mem.get("details", ""))).strip()
         lines.append(f"{idx}. [{layer}, relevance {score:.2f}] {content}")
     return "\n".join(lines)
 
 
 def main() -> None:
-    """Entry point — orchestrates health-check → search → output."""
-    # Read the user prompt.  Claude Code may pass it via USER_PROMPT env var
-    # or via STDIN depending on hook invocation mode.
     raw_prompt = os.environ.get("USER_PROMPT", "")
     if not raw_prompt:
         try:
@@ -102,20 +174,22 @@ def main() -> None:
         sys.stdout.write("{}")
         return
 
-    # Phase 1 – health check (fast-fail)
     if not _health_check():
         sys.stdout.write("{}")
         return
 
-    # Phase 2 – search
+    token = _get_token()
+    if not token:
+        sys.stdout.write("{}")
+        return
+
     query = _derive_query(raw_prompt)
-    results = _search(query)
+    results = _search(query, token)
 
     if not results:
         sys.stdout.write("{}")
         return
 
-    # Emit the hook response
     output = {"systemMessage": _format_memories(results)}
     sys.stdout.write(json.dumps(output))
 
@@ -124,5 +198,4 @@ if __name__ == "__main__":
     try:
         main()
     except Exception:
-        # Outermost safety net — never crash, never block the user
         sys.stdout.write("{}")

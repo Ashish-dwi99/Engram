@@ -21,7 +21,7 @@ from engram.core.category import CategoryProcessor, Category, CategoryType, Cate
 from engram.core.echo import EchoProcessor, EchoDepth, EchoResult
 from engram.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, CategoryMemConfig, ScopeConfig
 
-__version__ = "0.2.0"  # REST API + Simplified SDK
+__version__ = "0.4.0"  # Product release: Docker, CI, CLI improvements
 __all__ = [
     # Simplified interface (recommended)
     "Engram",

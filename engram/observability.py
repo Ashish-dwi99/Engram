@@ -150,6 +150,12 @@ class MemoryMetrics:
     total_forgotten: int = 0
     total_promoted: int = 0
     search_results_total: int = 0
+    total_masked_hits: int = 0
+    total_staged_commits: int = 0
+    total_auto_stashed: int = 0
+    total_commit_approved: int = 0
+    total_commit_rejected: int = 0
+    total_ref_protected_skips: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -158,6 +164,12 @@ class MemoryMetrics:
             "total_decayed": self.total_decayed,
             "total_forgotten": self.total_forgotten,
             "total_promoted": self.total_promoted,
+            "total_masked_hits": self.total_masked_hits,
+            "total_staged_commits": self.total_staged_commits,
+            "total_auto_stashed": self.total_auto_stashed,
+            "total_commit_approved": self.total_commit_approved,
+            "total_commit_rejected": self.total_commit_rejected,
+            "total_ref_protected_skips": self.total_ref_protected_skips,
             "avg_search_results": round(
                 self.search_results_total / self.total_searched, 2
             ) if self.total_searched > 0 else 0,
@@ -221,6 +233,31 @@ class MetricsCollector:
         """Record memory delete operation."""
         self.record_operation("delete", latency_ms, **tags)
 
+    def record_masked_hits(self, count: int = 1):
+        with self._lock:
+            self._memory.total_masked_hits += max(0, int(count))
+
+    def record_staged_commit(self, status: str):
+        status_upper = (status or "").upper()
+        with self._lock:
+            self._memory.total_staged_commits += 1
+            if status_upper == "AUTO_STASHED":
+                self._memory.total_auto_stashed += 1
+
+    def record_commit_approval(self, latency_ms: float):
+        self.record_operation("commit_approve", latency_ms)
+        with self._lock:
+            self._memory.total_commit_approved += 1
+
+    def record_commit_rejection(self):
+        self.record_operation("commit_reject", 0)
+        with self._lock:
+            self._memory.total_commit_rejected += 1
+
+    def record_ref_protected_skip(self, count: int = 1):
+        with self._lock:
+            self._memory.total_ref_protected_skips += max(0, int(count))
+
     def set_gauge(self, name: str, value: float):
         """Set a custom gauge metric."""
         with self._lock:
@@ -258,6 +295,12 @@ class MetricsCollector:
         lines.append(f'engram_memories_decayed_total {mem["total_decayed"]}')
         lines.append(f'engram_memories_forgotten_total {mem["total_forgotten"]}')
         lines.append(f'engram_memories_promoted_total {mem["total_promoted"]}')
+        lines.append(f'engram_memories_masked_hits_total {mem["total_masked_hits"]}')
+        lines.append(f'engram_staged_commits_total {mem["total_staged_commits"]}')
+        lines.append(f'engram_staged_auto_stashed_total {mem["total_auto_stashed"]}')
+        lines.append(f'engram_commit_approved_total {mem["total_commit_approved"]}')
+        lines.append(f'engram_commit_rejected_total {mem["total_commit_rejected"]}')
+        lines.append(f'engram_ref_protected_skips_total {mem["total_ref_protected_skips"]}')
 
         # Custom gauges
         for name, value in summary["gauges"].items():

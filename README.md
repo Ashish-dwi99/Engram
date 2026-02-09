@@ -4,771 +4,229 @@
   <br>
 </h1>
 
-<h3 align="center">
-  The Memory Layer for AI Agent Orchestrators
-</h3>
-
 <p align="center">
-  <b>Give your agents persistent memory that learns, forgets, and shares knowledge like humans do.</b>
-  <br><br>
-  Native MCP integration for <b>Claude Code</b>, <b>Cursor</b>, and <b>OpenAI Codex</b>.<br>
-  Bio-inspired architecture: memories strengthen with use, fade when irrelevant.<br>
-  Multi-agent knowledge sharing with user and agent scoping.
+  <b>Memory layer for AI agents with biologically-inspired forgetting.</b>
 </p>
 
 <p align="center">
-  <a href="#-quick-start">Quick Start</a> •
-  <a href="#-why-engram">Why Engram</a> •
-  <a href="#-multi-agent-memory">Multi-Agent</a> •
-  <a href="#-claude-code-cursor--codex-setup">Claude Code, Cursor & Codex</a> •
-  <a href="#-api-reference">API</a>
+  <a href="https://github.com/Ashish-dwi99/Engram/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
+  <a href="https://github.com/Ashish-dwi99/Engram/actions"><img src="https://github.com/Ashish-dwi99/Engram/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
+  <img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+">
 </p>
 
----
-
-## Why Engram?
-
-| Feature | Other Memory Layers | **Engram** |
-|---------|---------------------|------------|
-| Bio-inspired forgetting | No | **Ebbinghaus decay** |
-| Multi-modal encoding | No | **5 modes (echo)** |
-| Knowledge graph | Sometimes | **Entity linking** |
-| Dynamic categories | Rare | **Auto-discovered** |
-| Category decay | No | **Bio-inspired** |
-| Hybrid search | Vector only | **Semantic + Keyword** |
-| Storage efficiency | Store everything | **~45% less** |
-| MCP Server | Rare | **Claude/Cursor/Codex** |
-| Local LLMs (Ollama) | Sometimes | **Yes** |
-| Self-hosted | Cloud-first | **Local-first** |
-
-**Engram is different.** While other memory layers store everything forever, Engram uses bio-inspired mechanisms:
-
-- **Memories fade** when not accessed (Ebbinghaus decay curve)
-- **Important memories strengthen** through repeated access and get promoted to long-term storage
-- **Echo encoding** creates multiple retrieval paths (keywords, paraphrases, implications)
-- **Dynamic categories** emerge from content and evolve over time
-- **Knowledge graph** links memories by shared entities for relationship reasoning
-- **Hybrid search** combines semantic similarity with keyword matching
-
-The result: **better retrieval precision, lower storage costs, and memories that actually matter.**
+<p align="center">
+  <a href="#quick-start">Quick Start</a> &middot;
+  <a href="#what-is-engram">What is Engram</a> &middot;
+  <a href="#key-features">Features</a> &middot;
+  <a href="#integrations">Integrations</a> &middot;
+  <a href="#rest-api">API</a>
+</p>
 
 ---
 
 ## Quick Start
 
-### Installation
+```bash
+pip install -e ".[all]"        # 1. Install
+export GEMINI_API_KEY="..."    # 2. Set API key (or OPENAI_API_KEY)
+engram install                 # 3. Configure Claude Code, Cursor, Codex
+```
+
+Done. Your agents now have persistent memory.
+
+---
+
+## What is Engram
+
+Engram is a memory layer for AI agents. It stores knowledge, forgets what doesn't matter, and strengthens what does — using mechanisms inspired by how biological memory works. It plugs into Claude Code, Cursor, and Codex via MCP, or into any application via REST API and Python SDK.
+
+**100% free, forever. Bring your own API key (Gemini, OpenAI, or Ollama).**
+
+---
+
+## Key Features
+
+- **FadeMem** — Dual-layer memory (short-term / long-term) with Ebbinghaus decay. Memories fade when unused, strengthen when accessed, and promote automatically.
+- **EchoMem** — Multi-modal encoding creates multiple retrieval paths (keywords, paraphrases, implications, question forms) for better recall.
+- **CategoryMem** — Dynamic hierarchical categories emerge from content and evolve over time. Categories decay too.
+- **Scenes** — Episodic memory groups interactions into narrative scenes with time gap and topic shift detection.
+- **Profiles** — Character profile extraction tracks entities across conversations.
+- **Knowledge Graph** — Entity extraction and linking for relationship reasoning across memories.
+- **MCP Server** — Native Model Context Protocol integration for Claude Code, Cursor, and Codex.
+- **REST API** — Language-agnostic HTTP API with session tokens, staged writes, and namespace scoping.
+- **Hybrid Search** — Combines semantic similarity with keyword matching for better precision.
+- **Multi-Agent** — Scoped by user and agent. Agents share knowledge or isolate it.
+- **~45% Storage Reduction** — Compared to store-everything approaches.
+
+---
+
+## Installation
+
+### pip (recommended)
 
 ```bash
-# Clone the repository
+pip install -e ".[all]"
+```
+
+### Docker
+
+```bash
+docker compose up -d
+# API available at http://localhost:8100
+```
+
+### From source
+
+```bash
 git clone https://github.com/Ashish-dwi99/Engram.git
 cd Engram
-
-# Install with all dependencies
+python3 -m venv .venv && source .venv/bin/activate
 pip install -e ".[all]"
-
-# Set your API key
-export GEMINI_API_KEY="your-key"  # or OPENAI_API_KEY
 ```
 
-Or install directly from GitHub:
+Set one API key:
+
 ```bash
-pip install "engram[all] @ git+https://github.com/Ashish-dwi99/Engram.git"
+export GEMINI_API_KEY="your-key"    # Gemini (default)
+# or OPENAI_API_KEY for OpenAI
+# or OLLAMA_HOST for local Ollama (no key needed)
 ```
 
-### Usage
+---
 
-**Python SDK:**
+## Usage
+
+### MCP Tools
+
+After running `engram install`, your agent gets 14 MCP tools including:
+
+| Tool | Description |
+|------|-------------|
+| `add_memory` | Store a new memory |
+| `search_memory` | Semantic + keyword search |
+| `get_all_memories` | List stored memories |
+| `update_memory` / `delete_memory` | Modify or remove |
+| `apply_memory_decay` | Run forgetting algorithm |
+| `engram_context` | Load session digest from prior sessions |
+| `remember` | Quick-save a fact (no LLM extraction) |
+| `search_scenes` / `get_scene` | Episodic scene retrieval |
+
+### CLI
+
+```bash
+engram add "User prefers Python" -u user123
+engram search "programming" -u user123
+engram list -u user123
+engram stats
+engram status          # Version, config paths, DB stats
+engram serve           # Start REST API
+engram decay           # Apply forgetting
+engram export -o memories.json
+engram import memories.json
+```
+
+### Python SDK
 
 ```python
 from engram import Engram
 
 memory = Engram()
-memory.add("User prefers Python over JavaScript", user_id="u123")
+memory.add("User prefers Python", user_id="u123")
 results = memory.search("programming preferences", user_id="u123")
 ```
 
-**Claude Code / Cursor / Codex Integration:**
-
-For the full setup with MCP tools, proactive hooks, and slash commands, see [Claude Code, Cursor & Codex Setup](#claude-code-cursor--codex-setup) below.
-
----
-
-## Multi-Agent Memory
-
-Engram is designed for agent orchestrators. Every memory is scoped by `user_id` and optionally `agent_id`, enabling:
-
-### Knowledge Isolation
+Full interface with `Memory` class:
 
 ```python
-# Agent 1 stores knowledge
-memory.add("Project deadline is Friday", user_id="project_x", agent_id="planner")
+from engram import Memory
 
-# Agent 2 stores different knowledge
-memory.add("Budget is $50k", user_id="project_x", agent_id="analyst")
-
-# Search across all agents for a user
-all_results = memory.search("project details", user_id="project_x")
-
-# Search only one agent's knowledge
-planner_results = memory.search("deadlines", user_id="project_x", agent_id="planner")
+memory = Memory()
+memory.add(content, user_id, agent_id=None, categories=None, metadata=None)
+memory.search(query, user_id, limit=10)
+memory.get(memory_id)
+memory.update(memory_id, content)
+memory.delete(memory_id)
+memory.promote(memory_id)   # SML -> LML
+memory.history(memory_id)
+memory.get_related_memories(memory_id)  # Knowledge graph
 ```
 
-### Cross-Agent Knowledge Sharing
-
-```python
-# Researcher agent discovers information
-memory.add(
-    "The API rate limit is 100 req/min",
-    user_id="team_alpha",
-    agent_id="researcher",
-    categories=["technical", "api"]
-)
-
-# Coder agent can access shared knowledge
-results = memory.search("rate limits", user_id="team_alpha")
-# Returns the researcher's finding
-```
-
-### Memory Layers for Different Retention
-
-```python
-# Short-term (SML): Fast decay, recent context
-# Long-term (LML): Slow decay, important facts
-
-# Get only long-term memories
-important = memory.get_all(user_id="u123", layer="lml")
-
-# Memories auto-promote based on access patterns
-# Or manually promote critical information
-memory.promote(memory_id="abc123")
-```
-
-### Agent-Specific Statistics
-
-```python
-stats = memory.stats(user_id="project_x", agent_id="planner")
-# {
-#   "total": 42,
-#   "sml_count": 30,
-#   "lml_count": 12,
-#   "avg_strength": 0.73,
-#   "categories": ["deadlines", "tasks", "dependencies"]
-# }
-```
-
----
-
-## Claude Code, Cursor & Codex Setup
-
-Engram provides a native MCP (Model Context Protocol) server for seamless integration with Claude Code, Cursor, and OpenAI Codex.
-
-### Step-by-Step Setup
-
-**1. Install Engram**:
-
-```bash
-git clone https://github.com/Ashish-dwi99/Engram.git
-cd Engram
-python3 -m venv .venv
-source .venv/bin/activate  # Windows: .venv\Scripts\activate
-pip install -e ".[all]"
-```
-
-**2. Set your API key** (pick one):
-
-```bash
-export GEMINI_API_KEY="your-key-here"
-# OR
-export OPENAI_API_KEY="your-key-here"
-```
-
-**3. Run the installer** (still in your terminal):
-
-```bash
-engram-install
-```
-
-**What this does automatically:**
-- ✓ Writes MCP server config to `~/.claude.json` (Claude Code)
-- ✓ Writes MCP server config to `~/Library/Application Support/Claude/claude_desktop_config.json` (Claude Desktop)
-- ✓ Writes MCP server config to `~/.cursor/mcp.json` (Cursor)
-- ✓ Writes MCP server config to `~/.codex/config.toml` (Codex)
-- ✓ Deploys plugin files to `~/.engram/claude-plugin/engram-memory/`
-- ✓ Forwards your API keys to all configs
-
-**What it does NOT do:**
-- ✗ Does not start the Engram API (you need to run `engram-api` separately)
-- ✗ Does not activate the Claude Code plugin (requires `/plugin install` command)
-
-**4. Restart Claude Code/Codex/Cursor** so it loads the new MCP config.
-
-**5. Start the Engram API** (in a separate terminal, leave it running):
-
-```bash
-engram-api
-# Runs on http://127.0.0.1:8100
-```
-
-> **Note:** The API is required for the proactive hook to work. If the API is down, the hook exits silently and Claude Code continues normally (just without auto-injected context).
-
-**6. Activate the plugin** (inside Claude Code):
-
-```
-/plugin install engram-memory --path ~/.engram/claude-plugin
-```
-
-**Done!** The 10 MCP tools are now available, the proactive hook is active, and you can use `/engram:remember`, `/engram:search`, etc.
-
----
-
-### What You Get After Setup
-
-| Feature | Available After Step |
-|---|---|
-| 10 MCP tools (`add_memory`, `search_memory`, etc.) | Step 4 (restart Claude Code) |
-| Proactive memory injection (hook) | Step 6 (plugin activated) + API running |
-| `/engram:*` slash commands | Step 6 (plugin activated) |
-| Skill (standing instructions) | Step 6 (plugin activated) |
-
-If you only want the MCP tools (no proactive hook), stop after step 4. Steps 5-6 are only for the plugin features.
-
----
-
-### Troubleshooting
-
-**"Claude Code doesn't see the memory tools"**
-- Restart Claude Code after running `engram-install`
-- Check that `~/.claude.json` exists and has an `mcpServers.engram-memory` section
-- Verify your API key is set: `echo $GEMINI_API_KEY`
-
-**"The hook isn't injecting memories"**
-- Check that `engram-api` is running: `curl http://127.0.0.1:8100/health`
-- Verify the plugin is activated: in Claude Code, run `/plugin` and check that `engram-memory` appears in the list
-- Check the hook script is executable: `ls -l ~/.engram/claude-plugin/engram-memory/hooks/prompt_context.py` (should show `x` permission)
-
-**"Plugin activation failed"**
-- Verify plugin files exist: `ls ~/.engram/claude-plugin/engram-memory/`
-- If missing, run `engram-install` again
-- Make sure you're using the full path: `/plugin install engram-memory --path ~/.engram/claude-plugin`
-
-
----
-
-### Manual Configuration
-
-#### Claude Code / Claude Desktop
-
-Add to `~/.claude.json` (CLI) or `claude_desktop_config.json` (Desktop):
-
-```json
-{
-  "mcpServers": {
-    "engram-memory": {
-      "command": "python",
-      "args": ["-m", "engram.mcp_server"],
-      "env": {
-        "GEMINI_API_KEY": "your-api-key"
-      }
-    }
-  }
-}
-```
-
-#### Cursor
-
-Add to `~/.cursor/mcp.json`:
-
-```json
-{
-  "mcpServers": {
-    "engram-memory": {
-      "command": "python",
-      "args": ["-m", "engram.mcp_server"],
-      "env": {
-        "GEMINI_API_KEY": "your-api-key"
-      }
-    }
-  }
-}
-```
-
-> **Note:** If the file doesn't exist, create it. You can also configure MCP servers through Cursor's Settings UI under the MCP section.
-
-#### OpenAI Codex
-
-Add to `~/.codex/config.toml`:
-
-```toml
-[mcp_servers.engram-memory]
-command = "python"
-args = ["-m", "engram.mcp_server"]
-
-[mcp_servers.engram-memory.env]
-GEMINI_API_KEY = "your-api-key"
-```
-
-### Claude Code Plugin (Proactive Memory)
-
-The MCP tools above let Claude *react* to your requests. The **Claude Code plugin** makes memory *proactive* — relevant context is injected automatically before Claude even sees your message.
-
-`engram-install` deploys the plugin to `~/.engram/claude-plugin/engram-memory/`. To activate it inside Claude Code, run:
-
-```
-/plugin install engram-memory --path ~/.engram/claude-plugin
-```
-
-> **Requires a running Engram API** (`engram-api`) for the hook to fetch memories. If the API is down the hook exits silently — nothing breaks, you just don't get the auto-injection.
-
-#### What the plugin adds
-
-| Piece | What it does |
-|---|---|
-| **UserPromptSubmit hook** | Before each reply, queries Engram and injects matching memories into Claude's context. Stdlib-only script, no extra deps. |
-| `/engram:remember <text>` | Save a fact or preference on the spot |
-| `/engram:search <query>` | Search memories by topic |
-| `/engram:forget <id or query>` | Delete a memory (confirms before removing) |
-| `/engram:status` | Show memory-store stats at a glance |
-| **Skill (standing instructions)** | Tells Claude when to save, when to search, and how to surface injected context naturally |
-
-#### How the hook works
-
-```
-User types a message
-  → hook reads it, extracts a short query (no LLM, pure string ops)
-  → GET /health  (3 s timeout — fast-fail if API is down)
-  → POST /v1/search  (6 s timeout)
-  → matching memories injected as a system message
-  → Claude replies with that context already loaded
-```
-
-Total added latency is typically under 2 seconds, well within the 8-second hook timeout. On any failure the hook outputs `{}` and Claude proceeds normally.
-
----
-
-### Available MCP Tools
-
-Once configured, your agent has access to these tools:
-
-| Tool | Description | Example Use |
-|------|-------------|-------------|
-| `add_memory` | Store a new memory | "Remember that the user prefers dark mode" |
-| `search_memory` | Find relevant memories | "What are the user's UI preferences?" |
-| `get_all_memories` | List all stored memories | "Show me everything I know about this user" |
-| `get_memory` | Get a specific memory by ID | Retrieve exact memory content |
-| `update_memory` | Update memory content | Correct outdated information |
-| `delete_memory` | Remove a memory | Remove sensitive or incorrect data |
-| `get_memory_stats` | Get storage statistics | Monitor memory health |
-| `apply_memory_decay` | Run forgetting algorithm | Periodic cleanup of stale memories |
-| `engram_context` | Load session digest from prior sessions | Call once at conversation start; returns top memories, LML first |
-| `remember` | Quick-save a fact or preference | Stores directly with `source_app=claude-code`, no LLM extraction |
-
-### Example: Claude Code with Memory
-
-**Without the plugin** — Claude reacts to explicit requests via MCP tools:
-
-```
-You: Remember that I prefer using TypeScript for all new projects
-
-Claude: I'll remember that preference for you.
-[Calls remember tool → stored with source_app=claude-code]
-```
-
-**With the plugin** — memory is proactive and invisible:
-
-```
---- Session A ---
-You: /engram:remember I prefer TypeScript for all new projects
-Claude: Saved to memory.
-
---- Session B (new conversation, no history) ---
-You: What stack should I use for the new API?
-
-[Hook runs silently: queries Engram, injects "TypeScript preference" into context]
-
-Claude: Based on your preferences, I'd recommend TypeScript...
-        (no search_memory call needed — context was already there)
-```
-
-### Example: Multi-Agent Codex Workflow
-
-```python
-# Agent 1: Research Agent
-memory.add(
-    "The target API uses OAuth 2.0 with JWT tokens",
-    user_id="project_123",
-    agent_id="researcher"
-)
-
-# Agent 2: Implementation Agent searches shared knowledge
-results = memory.search("authentication method", user_id="project_123")
-# Finds: "OAuth 2.0 with JWT tokens"
-
-# Agent 3: Review Agent adds findings
-memory.add(
-    "Security review passed for OAuth implementation",
-    user_id="project_123",
-    agent_id="reviewer"
-)
-```
-
----
-
-## REST API
-
-Start the HTTP API server for language-agnostic integration:
+### REST API
 
 ```bash
 engram-api  # Starts on http://127.0.0.1:8100
 ```
 
-### Endpoints
-
 ```bash
 # Add memory
 curl -X POST http://localhost:8100/v1/memories \
   -H "Content-Type: application/json" \
-  -d '{"content": "User prefers dark mode", "user_id": "u123", "agent_id": "ui_agent"}'
+  -d '{"content": "User prefers dark mode", "user_id": "u123"}'
 
-# Search memories
+# Search
 curl -X POST http://localhost:8100/v1/search \
   -H "Content-Type: application/json" \
   -d '{"query": "UI preferences", "user_id": "u123"}'
 
-# Get all memories
-curl "http://localhost:8100/v1/memories?user_id=u123"
-
-# Get statistics
+# Stats
 curl "http://localhost:8100/v1/stats?user_id=u123"
-
-# Apply decay (forgetting)
-curl -X POST http://localhost:8100/v1/decay \
-  -H "Content-Type: application/json" \
-  -d '{"user_id": "u123"}'
-
-# Get categories
-curl "http://localhost:8100/v1/categories?user_id=u123"
 ```
 
-API documentation: http://localhost:8100/docs
+Full API docs at http://localhost:8100/docs
 
 ---
 
-## How It Works
+## Integrations
 
-Engram combines three bio-inspired memory systems:
+### Claude Code
 
-### FadeMem: Decay & Consolidation
-
-```
-┌─────────────────────────────────────────────────────────┐
-│                    Memory Lifecycle                      │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  New Memory → Short-term (SML)                          │
-│                    │                                    │
-│                    │ Accessed frequently?               │
-│                    ▼                                    │
-│              ┌─────────┐                                │
-│         No ← │ Decay   │ → Yes                          │
-│              └─────────┘                                │
-│              │         │                                │
-│              ▼         ▼                                │
-│         Forgotten   Promoted to Long-term (LML)         │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
+```bash
+engram install   # Writes MCP config to ~/.claude.json
 ```
 
-- **Adaptive Decay**: Memories fade based on time and access patterns
-- **Dual-Layer Architecture**: Short-term (fast decay) → Long-term (slow decay)
-- **Automatic Promotion**: Frequently accessed memories get promoted
-- **Conflict Resolution**: LLM detects contradictions and updates old info
-- **~45% Storage Reduction**: Compared to store-everything approaches
+The optional **Claude Code plugin** adds proactive memory injection (relevant context is loaded before each reply), slash commands (`/engram:remember`, `/engram:search`, `/engram:status`), and standing instructions.
 
-### EchoMem: Multi-Modal Encoding
-
-```
-Input: "User prefers TypeScript over JavaScript"
-                    │
-                    ▼
-┌─────────────────────────────────────────────────────────┐
-│                  Stored Memory                          │
-├─────────────────────────────────────────────────────────┤
-│  raw: "User prefers TypeScript over JavaScript"         │
-│  paraphrase: "TypeScript is the user's preferred..."    │
-│  keywords: ["typescript", "javascript", "preference"]   │
-│  implications: ["values type safety", "modern tooling"] │
-│  question_form: "What language does the user prefer?"   │
-│  strength: 1.3x (medium depth)                          │
-└─────────────────────────────────────────────────────────┘
+```bash
+# Activate plugin inside Claude Code:
+/plugin install engram-memory --path ~/.engram/claude-plugin
 ```
 
-- **Multiple Retrieval Paths**: Keywords, paraphrases, implications, questions
-- **Importance-Based Depth**: Critical info gets deeper processing (1.6x strength)
-- **Better Query Matching**: Question-form embeddings match search queries
-- **Re-Echo on Access**: Accessed memories get stronger encoding
+Requires `engram-api` running for the proactive hook.
 
-### CategoryMem: Dynamic Organization
+### Cursor
 
-```
-┌─────────────────────────────────────────────────────────┐
-│                  Auto-Generated Categories               │
-├─────────────────────────────────────────────────────────┤
-│                                                         │
-│  preferences/              technical/                   │
-│  ├── coding/               ├── apis/                    │
-│  │   ├── languages (3)     │   └── rate_limits (2)      │
-│  │   └── tools (2)         └── infrastructure (4)       │
-│  └── ui (4)                                             │
-│                                                         │
-│  projects/                 corrections/                 │
-│  └── active (6)            └── learned (2)              │
-│                                                         │
-└─────────────────────────────────────────────────────────┘
-```
+`engram install` writes MCP config to `~/.cursor/mcp.json`. Restart Cursor to load.
 
-- **Dynamic Categories**: Auto-discovered from content, not predefined
-- **Category Decay**: Unused categories weaken and merge
-- **Category-Aware Search**: Boost results from relevant categories
-- **Hierarchical Structure**: Up to 3 levels of nesting
+### OpenAI Codex
+
+`engram install` writes MCP config to `~/.codex/config.toml`. Restart Codex to load.
+
+### OpenClaw
+
+`engram install` deploys the Engram skill to OpenClaw's skills directory.
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────────────────────────────────────────────────────────┐
-│                    Agent Orchestrator                           │
-│              (Claude Code / Codex / LangChain / etc.)           │
-└─────────────────────────────────────────────────────────────────┘
-                              │
-              ┌───────────────┼───────────────┐
-              │               │               │
-              ▼               ▼               ▼
-        ┌──────────┐   ┌──────────┐   ┌──────────┐
-        │ Agent 1  │   │ Agent 2  │   │ Agent 3  │
-        │ (user,   │   │ (user,   │   │ (user,   │
-        │  agent)  │   │  agent)  │   │  agent)  │
-        └──────────┘   └──────────┘   └──────────┘
-              │               │               │
-              └───────────────┼───────────────┘
-                              │
-                              ▼
-┌─────────────────────────────────────────────────────────────────┐
-│                          Engram                                  │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                 Knowledge Graph Layer                     │  │
-│  │            (Entity Extraction & Linking)                  │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│                              │                                  │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                   CategoryMem Layer                       │  │
-│  │           (Dynamic Hierarchical Organization)             │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│                              │                                  │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                     EchoMem Layer                         │  │
-│  │         (Multi-Modal Encoding & Retrieval)                │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│                              │                                  │
-│  ┌───────────────────────────────────────────────────────────┐  │
-│  │                     FadeMem Layer                         │  │
-│  │           (Decay, Promotion & Consolidation)              │  │
-│  └───────────────────────────────────────────────────────────┘  │
-│                              │                                  │
-│  ┌──────────────┐  ┌──────────────┐  ┌──────────────────────┐  │
-│  │   Embedder   │  │     LLM      │  │    Vector Store      │  │
-│  │   (Gemini/   │  │  (Gemini/    │  │  (Qdrant/In-memory)  │  │
-│  │ OpenAI/Ollama│  │ OpenAI/Ollama│  │                      │  │
-│  └──────────────┘  └──────────────┘  └──────────────────────┘  │
-└─────────────────────────────────────────────────────────────────┘
+Agent (Claude Code / Codex / Cursor / LangChain)
+  │
+  ▼
+┌─────────────────────────────────────────────┐
+│                  Engram                      │
+│                                              │
+│  Knowledge Graph  (entity linking)           │
+│  CategoryMem      (dynamic organization)     │
+│  EchoMem          (multi-modal encoding)     │
+│  FadeMem          (decay & consolidation)    │
+│                                              │
+│  Embedder: Gemini / OpenAI / Ollama          │
+│  Store:    SQLite + in-memory vectors        │
+└─────────────────────────────────────────────┘
 ```
 
----
-
-## API Reference
-
-### Engram Class (Simple Interface)
-
-```python
-from engram import Engram
-
-memory = Engram(
-    provider="gemini",      # or "openai", "ollama" - auto-detected from env
-    in_memory=False,        # True for testing
-    enable_echo=True,       # Multi-modal encoding
-    enable_categories=True, # Dynamic categorization
-    enable_graph=True       # Knowledge graph for entity linking
-)
-
-# Add memory
-memory.add(content, user_id, agent_id=None, categories=None, metadata=None)
-
-# Search memories
-memory.search(query, user_id, agent_id=None, limit=10, categories=None)
-
-# Get all memories
-memory.get_all(user_id, agent_id=None, layer=None, limit=100)
-
-# Get statistics
-memory.stats(user_id=None, agent_id=None)
-
-# Apply decay (forgetting)
-memory.decay(user_id=None, agent_id=None)
-```
-
-### Memory Class (Full Interface)
-
-```python
-from engram import Memory
-from engram.configs.base import MemoryConfig
-
-config = MemoryConfig(
-    # Vector store: "qdrant" or "memory"
-    # LLM: "gemini" or "openai"
-    # FadeMem, EchoMem, CategoryMem configs
-)
-
-memory = Memory(config)
-
-# All Engram methods plus:
-memory.get(memory_id)
-memory.update(memory_id, content)
-memory.delete(memory_id)
-memory.delete_all(user_id=None, agent_id=None)
-memory.history(memory_id)
-memory.promote(memory_id)  # SML → LML
-memory.demote(memory_id)   # LML → SML
-memory.fuse(memory_ids)    # Combine related memories
-
-# Category methods
-memory.get_category_tree()
-memory.get_all_summaries()
-memory.search_by_category(category_id)
-
-# Knowledge graph methods
-memory.get_related_memories(memory_id)   # Graph traversal
-memory.get_memory_entities(memory_id)    # Extracted entities
-memory.get_entity_memories(entity_name)  # Memories with entity
-memory.get_memory_graph(memory_id)       # Visualization data
-memory.get_graph_stats()                 # Graph statistics
-```
-
-### Async Support
-
-```python
-from engram.memory.async_memory import AsyncMemory
-
-async with AsyncMemory() as memory:
-    await memory.add("User prefers Python", user_id="u1")
-    results = await memory.search("programming", user_id="u1")
-```
-
----
-
-## Configuration
-
-### Environment Variables
-
-```bash
-# LLM & Embeddings (choose one)
-export GEMINI_API_KEY="your-key"    # Gemini (default)
-export OPENAI_API_KEY="your-key"    # OpenAI
-export OLLAMA_HOST="http://localhost:11434"  # Ollama (local, no key needed)
-
-# Optional: Vector store
-export QDRANT_HOST="localhost"
-export QDRANT_PORT="6333"
-```
-
-### Full Configuration
-
-```python
-from engram.configs.base import (
-    MemoryConfig,
-    FadeMemConfig,
-    EchoMemConfig,
-    CategoryMemConfig,
-)
-
-config = MemoryConfig(
-    # FadeMem: Decay & consolidation
-    fadem=FadeMemConfig(
-        enable_forgetting=True,
-        sml_decay_rate=0.15,      # Short-term decay
-        lml_decay_rate=0.02,      # Long-term decay
-        promotion_access_threshold=3,
-        forgetting_threshold=0.1,
-    ),
-
-    # EchoMem: Multi-modal encoding
-    echo=EchoMemConfig(
-        enable_echo=True,
-        auto_depth=True,
-        shallow_multiplier=1.0,
-        medium_multiplier=1.3,
-        deep_multiplier=1.6,
-    ),
-
-    # CategoryMem: Dynamic organization
-    category=CategoryMemConfig(
-        enable_categories=True,
-        auto_categorize=True,
-        enable_category_decay=True,
-        max_category_depth=3,
-    ),
-)
-```
-
----
-
-## CLI
-
-```bash
-# Install MCP server for Claude/Cursor/Codex
-engram-install
-
-# Start REST API server
-engram-api
-
-# Start MCP server directly
-engram-mcp
-
-# Interactive commands
-engram add "User prefers Python" --user u123
-engram search "programming" --user u123
-engram list --user u123
-engram stats --user u123
-engram decay --user u123
-engram categories --user u123
-engram export --user u123 --output memories.json
-engram import memories.json --user u123  # Import from Engram/Mem0 format
-```
-
----
-
-## Research
-
-Engram is based on the paper:
-
-> **FadeMem: Biologically-Inspired Forgetting for Efficient Agent Memory**
->
-> arXiv:2601.18642
-
-### Key Results
-
-| Metric | Improvement |
-|--------|-------------|
-| Storage Reduction | ~45% |
-| Multi-hop Reasoning | +12% accuracy |
-| Retrieval Precision | +8% on LTI-Bench |
-
-### Biological Inspiration
-
-- **Ebbinghaus Forgetting Curve** → Exponential decay
-- **Spaced Repetition** → Access boosts strength
-- **Sleep Consolidation** → SML → LML promotion
-- **Production Effect** → Echo encoding improves retention
-- **Elaborative Encoding** → Deeper processing = stronger memory
+Memories flow through four layers: FadeMem manages lifecycle (decay, promotion, forgetting), EchoMem creates multiple encodings for better retrieval, CategoryMem organizes content into dynamic hierarchies, and the Knowledge Graph links entities across memories.
 
 ---
 
@@ -778,22 +236,17 @@ Engram is based on the paper:
 git clone https://github.com/Ashish-dwi99/Engram.git
 cd Engram
 pip install -e ".[dev]"
-pytest
+pytest tests/ -v
 ```
 
 ---
 
 ## License
 
-MIT License - see [LICENSE](LICENSE) for details.
+MIT License — see [LICENSE](LICENSE) for details.
 
 ---
 
 <p align="center">
   <b>Built for AI agents that need to remember what matters.</b>
-</p>
-
-<p align="center">
-  <a href="https://github.com/Ashish-dwi99/Engram">GitHub</a> •
-  <a href="https://github.com/Ashish-dwi99/Engram/issues">Issues</a>
 </p>
