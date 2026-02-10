@@ -27,6 +27,45 @@ class SessionCreateResponse(BaseModel):
     namespaces: List[str]
 
 
+class HandoffResumeRequest(BaseModel):
+    user_id: str = Field(default="default")
+    agent_id: Optional[str] = Field(default=None)
+    requester_agent_id: Optional[str] = Field(default=None)
+    repo_path: Optional[str] = Field(default=None)
+    branch: Optional[str] = Field(default=None)
+    lane_type: str = Field(default="general")
+    objective: Optional[str] = Field(default=None)
+    agent_role: Optional[str] = Field(default=None)
+    namespace: str = Field(default="default")
+    statuses: Optional[List[str]] = Field(default=None)
+    auto_create: bool = Field(default=True)
+
+
+class HandoffCheckpointRequest(BaseModel):
+    user_id: str = Field(default="default")
+    agent_id: str
+    requester_agent_id: Optional[str] = Field(default=None)
+    repo_path: Optional[str] = Field(default=None)
+    branch: Optional[str] = Field(default=None)
+    lane_id: Optional[str] = Field(default=None)
+    lane_type: str = Field(default="general")
+    objective: Optional[str] = Field(default=None)
+    agent_role: Optional[str] = Field(default=None)
+    namespace: str = Field(default="default")
+    confidentiality_scope: str = Field(default="work")
+    event_type: str = Field(default="tool_complete")
+    status: str = Field(default="active")
+    task_summary: Optional[str] = Field(default=None)
+    decisions_made: List[str] = Field(default_factory=list)
+    files_touched: List[str] = Field(default_factory=list)
+    todos_remaining: List[str] = Field(default_factory=list)
+    blockers: List[str] = Field(default_factory=list)
+    key_commands: List[str] = Field(default_factory=list)
+    test_results: List[str] = Field(default_factory=list)
+    context_snapshot: Optional[str] = Field(default=None)
+    expected_version: Optional[int] = Field(default=None)
+
+
 class SearchRequestV2(BaseModel):
     query: str
     user_id: str = Field(default="default")

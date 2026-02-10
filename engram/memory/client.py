@@ -168,6 +168,109 @@ class MemoryClient:
         }
         return self._request("POST", "/v1/sleep/run", json_body=payload)
 
+    def handoff_resume(
+        self,
+        *,
+        user_id: str,
+        agent_id: Optional[str] = None,
+        repo_path: Optional[str] = None,
+        branch: Optional[str] = None,
+        lane_type: str = "general",
+        objective: Optional[str] = None,
+        agent_role: Optional[str] = None,
+        namespace: str = "default",
+        statuses: Optional[List[str]] = None,
+        auto_create: bool = True,
+        requester_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "repo_path": repo_path,
+            "branch": branch,
+            "lane_type": lane_type,
+            "objective": objective,
+            "agent_role": agent_role,
+            "namespace": namespace,
+            "statuses": statuses,
+            "auto_create": auto_create,
+            "requester_agent_id": requester_agent_id,
+        }
+        return self._request("POST", "/v1/handoff/resume", json_body=payload)
+
+    def handoff_checkpoint(
+        self,
+        *,
+        user_id: str,
+        agent_id: str,
+        task_summary: Optional[str] = None,
+        status: str = "active",
+        repo_path: Optional[str] = None,
+        branch: Optional[str] = None,
+        lane_id: Optional[str] = None,
+        lane_type: str = "general",
+        objective: Optional[str] = None,
+        agent_role: Optional[str] = None,
+        namespace: str = "default",
+        confidentiality_scope: str = "work",
+        event_type: str = "tool_complete",
+        decisions_made: Optional[List[str]] = None,
+        files_touched: Optional[List[str]] = None,
+        todos_remaining: Optional[List[str]] = None,
+        blockers: Optional[List[str]] = None,
+        key_commands: Optional[List[str]] = None,
+        test_results: Optional[List[str]] = None,
+        context_snapshot: Optional[str] = None,
+        expected_version: Optional[int] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        payload: Dict[str, Any] = {
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "task_summary": task_summary,
+            "status": status,
+            "repo_path": repo_path,
+            "branch": branch,
+            "lane_id": lane_id,
+            "lane_type": lane_type,
+            "objective": objective,
+            "agent_role": agent_role,
+            "namespace": namespace,
+            "confidentiality_scope": confidentiality_scope,
+            "event_type": event_type,
+            "decisions_made": decisions_made or [],
+            "files_touched": files_touched or [],
+            "todos_remaining": todos_remaining or [],
+            "blockers": blockers or [],
+            "key_commands": key_commands or [],
+            "test_results": test_results or [],
+            "context_snapshot": context_snapshot,
+            "expected_version": expected_version,
+            "requester_agent_id": requester_agent_id,
+        }
+        return self._request("POST", "/v1/handoff/checkpoint", json_body=payload)
+
+    def list_handoff_lanes(
+        self,
+        *,
+        user_id: str,
+        repo_path: Optional[str] = None,
+        status: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
+        limit: int = 20,
+        requester_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "user_id": user_id,
+            "repo_path": repo_path,
+            "status": status,
+            "limit": limit,
+            "requester_agent_id": requester_agent_id,
+        }
+        if statuses:
+            params["statuses"] = statuses
+        return self._request("GET", "/v1/handoff/lanes", params=params)
+
     def get_agent_trust(self, *, user_id: str, agent_id: str) -> Dict[str, Any]:
         return self._request("GET", "/v1/trust", params={"user_id": user_id, "agent_id": agent_id})
 

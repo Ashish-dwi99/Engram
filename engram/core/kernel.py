@@ -13,6 +13,7 @@ from engram.core.invariants import InvariantEngine
 from engram.core.policy import (
     CONFIDENTIALITY_SCOPES,
     DEFAULT_CAPABILITIES,
+    HANDOFF_CAPABILITIES,
     default_allowed_scopes,
     detect_confidentiality_scope,
     enforce_scope_on_results,
@@ -94,6 +95,20 @@ class PersonalMemoryKernel:
             require_policy = feature_enabled("ENGRAM_V2_REQUIRE_AGENT_POLICY", default=False)
             if require_policy and not policy:
                 raise PermissionError(f"No agent policy configured for user={user_id} agent={agent_id}")
+
+        requested_caps = set(normalized_capabilities)
+        handoff_caps = set(HANDOFF_CAPABILITIES)
+        if requested_caps & handoff_caps:
+            if agent_id and not policy:
+                policy = self._bootstrap_handoff_policy_if_trusted(
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    namespaces=normalized_namespaces,
+                )
+            if not policy:
+                raise PermissionError(
+                    f"Handoff capabilities require explicit agent policy for user={user_id} agent={agent_id}"
+                )
 
         if policy:
             normalized_scopes = self._clamp_scopes_with_policy(
@@ -210,6 +225,42 @@ class PersonalMemoryKernel:
         if not resolved:
             resolved = ["default"]
         return resolved
+
+    def _bootstrap_handoff_policy_if_trusted(
+        self,
+        *,
+        user_id: str,
+        agent_id: str,
+        namespaces: Optional[List[str]],
+    ) -> Optional[Dict[str, Any]]:
+        handoff_cfg = getattr(self.memory, "handoff_config", None)
+        trusted_agents = {
+            str(value).strip().lower()
+            for value in getattr(handoff_cfg, "auto_trusted_agents", [])
+            if str(value).strip()
+        }
+        if str(agent_id).strip().lower() not in trusted_agents:
+            return None
+
+        allowed_namespaces = ["default"]
+        for namespace in namespaces or []:
+            ns_value = self._normalize_namespace(namespace)
+            if ns_value not in allowed_namespaces:
+                allowed_namespaces.append(ns_value)
+
+        allowed_capabilities = sorted(set(list(DEFAULT_CAPABILITIES) + list(HANDOFF_CAPABILITIES)))
+        self.db.upsert_agent_policy(
+            user_id=user_id,
+            agent_id=agent_id,
+            allowed_confidentiality_scopes=list(CONFIDENTIALITY_SCOPES),
+            allowed_capabilities=allowed_capabilities,
+            allowed_namespaces=allowed_namespaces,
+        )
+        return self.db.get_agent_policy(
+            user_id=user_id,
+            agent_id=agent_id,
+            include_wildcard=True,
+        )
 
     @staticmethod
     def _normalize_policy_namespaces(namespaces: Optional[List[str]]) -> List[str]:
@@ -1344,3 +1395,242 @@ class PersonalMemoryKernel:
             )
         deleted = self.db.delete_agent_policy(user_id=user_id, agent_id=agent_id)
         return {"deleted": bool(deleted), "user_id": user_id, "agent_id": agent_id}
+
+    # ------------------------------------------------------------------
+    # Handoff session bus methods
+    # ------------------------------------------------------------------
+
+    def _require_handoff_processor(self):
+        processor = getattr(self.memory, "handoff_processor", None)
+        if processor is None:
+            raise RuntimeError("Handoff is disabled")
+        return processor
+
+    def save_session_digest(
+        self,
+        *,
+        user_id: str,
+        agent_id: str,
+        digest: Dict[str, Any],
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        caller_agent = requester_agent_id or agent_id
+        if token or caller_agent:
+            self.authenticate_session(
+                token=token,
+                user_id=user_id,
+                agent_id=caller_agent,
+                require_for_agent=bool(caller_agent),
+                required_capabilities=["write_handoff"],
+            )
+        processor = self._require_handoff_processor()
+        return processor.save_digest(user_id=user_id, agent_id=agent_id, digest=digest)
+
+    def get_last_session(
+        self,
+        *,
+        user_id: str,
+        agent_id: Optional[str] = None,
+        repo: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        caller_agent = requester_agent_id or agent_id
+        if token or caller_agent:
+            self.authenticate_session(
+                token=token,
+                user_id=user_id,
+                agent_id=caller_agent,
+                require_for_agent=bool(caller_agent),
+                required_capabilities=["read_handoff"],
+            )
+        processor = self._require_handoff_processor()
+        return processor.get_last_session(
+            user_id=user_id,
+            agent_id=agent_id,
+            repo=repo,
+            statuses=statuses,
+        )
+
+    def list_sessions(
+        self,
+        *,
+        user_id: str,
+        agent_id: Optional[str] = None,
+        repo: Optional[str] = None,
+        status: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
+        limit: int = 20,
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        caller_agent = requester_agent_id or agent_id
+        if token or caller_agent:
+            self.authenticate_session(
+                token=token,
+                user_id=user_id,
+                agent_id=caller_agent,
+                require_for_agent=bool(caller_agent),
+                required_capabilities=["read_handoff"],
+            )
+        processor = self._require_handoff_processor()
+        return processor.list_sessions(
+            user_id=user_id,
+            agent_id=agent_id,
+            repo=repo,
+            status=status,
+            statuses=statuses,
+            limit=limit,
+        )
+
+    def auto_resume_context(
+        self,
+        *,
+        user_id: str,
+        agent_id: Optional[str],
+        repo_path: Optional[str] = None,
+        branch: Optional[str] = None,
+        lane_type: str = "general",
+        objective: Optional[str] = None,
+        agent_role: Optional[str] = None,
+        namespace: str = "default",
+        statuses: Optional[List[str]] = None,
+        auto_create: bool = True,
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        caller_agent = requester_agent_id or agent_id
+        if token or caller_agent:
+            self.authenticate_session(
+                token=token,
+                user_id=user_id,
+                agent_id=caller_agent,
+                require_for_agent=bool(caller_agent),
+                required_capabilities=["read_handoff"],
+            )
+        processor = self._require_handoff_processor()
+        return processor.auto_resume_context(
+            user_id=user_id,
+            agent_id=agent_id,
+            repo_path=repo_path,
+            branch=branch,
+            lane_type=lane_type,
+            objective=objective,
+            agent_role=agent_role,
+            namespace=namespace,
+            statuses=statuses,
+            auto_create=auto_create,
+        )
+
+    def auto_checkpoint(
+        self,
+        *,
+        user_id: str,
+        agent_id: str,
+        payload: Dict[str, Any],
+        event_type: str = "tool_complete",
+        repo_path: Optional[str] = None,
+        branch: Optional[str] = None,
+        lane_id: Optional[str] = None,
+        lane_type: str = "general",
+        objective: Optional[str] = None,
+        agent_role: Optional[str] = None,
+        namespace: str = "default",
+        confidentiality_scope: str = "work",
+        expected_version: Optional[int] = None,
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        caller_agent = requester_agent_id or agent_id
+        if token or caller_agent:
+            self.authenticate_session(
+                token=token,
+                user_id=user_id,
+                agent_id=caller_agent,
+                require_for_agent=bool(caller_agent),
+                required_capabilities=["write_handoff"],
+            )
+        processor = self._require_handoff_processor()
+        return processor.auto_checkpoint(
+            user_id=user_id,
+            agent_id=agent_id,
+            payload=payload,
+            event_type=event_type,
+            repo_path=repo_path,
+            branch=branch,
+            lane_id=lane_id,
+            lane_type=lane_type,
+            objective=objective,
+            agent_role=agent_role,
+            namespace=namespace,
+            confidentiality_scope=confidentiality_scope,
+            expected_version=expected_version,
+        )
+
+    def finalize_lane(
+        self,
+        *,
+        user_id: str,
+        agent_id: str,
+        lane_id: str,
+        status: str = "paused",
+        payload: Optional[Dict[str, Any]] = None,
+        repo_path: Optional[str] = None,
+        branch: Optional[str] = None,
+        agent_role: Optional[str] = None,
+        namespace: str = "default",
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        caller_agent = requester_agent_id or agent_id
+        if token or caller_agent:
+            self.authenticate_session(
+                token=token,
+                user_id=user_id,
+                agent_id=caller_agent,
+                require_for_agent=bool(caller_agent),
+                required_capabilities=["write_handoff"],
+            )
+        processor = self._require_handoff_processor()
+        return processor.finalize_lane(
+            user_id=user_id,
+            agent_id=agent_id,
+            lane_id=lane_id,
+            status=status,
+            payload=payload,
+            repo_path=repo_path,
+            branch=branch,
+            agent_role=agent_role,
+            namespace=namespace,
+        )
+
+    def list_handoff_lanes(
+        self,
+        *,
+        user_id: str,
+        repo_path: Optional[str] = None,
+        status: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
+        limit: int = 20,
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        caller_agent = requester_agent_id
+        if token or caller_agent:
+            self.authenticate_session(
+                token=token,
+                user_id=user_id,
+                agent_id=caller_agent,
+                require_for_agent=bool(caller_agent),
+                required_capabilities=["read_handoff"],
+            )
+        processor = self._require_handoff_processor()
+        return processor.list_lanes(
+            user_id=user_id,
+            repo_path=repo_path,
+            status=status,
+            statuses=statuses,
+            limit=limit,
+        )

@@ -360,7 +360,19 @@ If the sentinel block is present, read and use it to inform your reply.
 Do **not** paste or quote the raw injected block to the user.  Weave the
 information naturally into your response.
 
-## Rule 2 — Proactively save when the user signals intent
+## Rule 2 — Always do handoff bootstrap on new task threads
+
+At the beginning of a new repo/task thread, call `get_last_session` before
+deep implementation guidance:
+* `user_id`: `"default"` unless user provides another
+* `requester_agent_id`: `"claude-code"`
+* `repo`: absolute workspace path when available
+* Include `agent_id` only if the user explicitly asks to resume from a specific source agent.
+
+If a handoff session exists, continue from it naturally without exposing raw
+tool payloads.
+
+## Rule 3 — Proactively save when the user signals intent
 
 Call `remember` when you see any of:
 * An explicit "remember this" or "don't forget" instruction
@@ -369,21 +381,34 @@ Call `remember` when you see any of:
 
 Do **not** spam the store — one clean save per signal is enough.
 
-## Rule 3 — Search on explicit recall requests
+## Rule 4 — Search on explicit recall requests
 
 When the user says something like "what did we …", "recall …", or
 "from last time …", call `search_memory` with a short query derived
 from their words.  Present results naturally; do not show raw JSON.
 
-## Rule 4 — Stay quiet about the plumbing
+## Rule 5 — Save handoff digest before pausing/ending
+
+When pausing, hitting tool limits, or ending a substantial work chunk, call
+`save_session_digest` with:
+* `task_summary`
+* `repo`
+* `status` (`paused`/`active`/`completed`)
+* `decisions_made`, `files_touched`, `todos_remaining`
+* `blockers`, `key_commands`, `test_results` when available
+* `agent_id` and `requester_agent_id` as `"claude-code"`
+
+## Rule 6 — Stay quiet about the plumbing
 
 Never mention hooks, plugin files, MCP transport, or internal URLs
 unless the user explicitly asks how memory works.
 
-## Rule 5 — Tool selection guide
+## Rule 7 — Tool selection guide
 
 | User intent | Tool to call | Key params |
 |---|---|---|
+| Resume prior repo task | `get_last_session` | `user_id`, `repo` (`agent_id` only when explicitly requested) |
+| Save cross-agent handoff | `save_session_digest` | `task_summary`, `status`, `files_touched`, `todos_remaining` |
 | Quick save (no categories) | `remember` | `content` |
 | Save with categories / scope | `add_memory` | `content`, `categories`, `scope` |
 | Find something from before | `search_memory` | `query`, `limit` |
