@@ -19,6 +19,10 @@ class EmbedderFactory:
             from engram.embeddings.ollama import OllamaEmbedder
 
             return OllamaEmbedder(config)
+        if provider == "nvidia":
+            from engram.embeddings.nvidia import NvidiaEmbedder
+
+            return NvidiaEmbedder(config)
         raise ValueError(f"Unsupported embedder provider: {provider}")
 
 
@@ -41,6 +45,10 @@ class LLMFactory:
             from engram.llms.ollama import OllamaLLM
 
             return OllamaLLM(config)
+        if provider == "nvidia":
+            from engram.llms.nvidia import NvidiaLLM
+
+            return NvidiaLLM(config)
         raise ValueError(f"Unsupported LLM provider: {provider}")
 
 
