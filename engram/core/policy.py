@@ -20,6 +20,7 @@ DEFAULT_CAPABILITIES = [
     "manage_namespaces",
     "run_sleep_cycle",
 ]
+HANDOFF_CAPABILITIES = ["read_handoff", "write_handoff"]
 SENSITIVE_HINTS = {
     "finance": {"finance", "bank", "salary", "invoice", "tax", "payment", "credit"},
     "health": {"health", "medical", "doctor", "diagnosis", "therapy", "medication"},

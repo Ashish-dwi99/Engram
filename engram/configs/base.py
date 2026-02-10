@@ -1,5 +1,5 @@
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
@@ -114,6 +114,32 @@ class ProfileConfig(BaseModel):
     max_facts_per_profile: int = 100
 
 
+class HandoffConfig(BaseModel):
+    """Configuration for cross-agent session handoff."""
+    enable_handoff: bool = True
+    auto_enrich: bool = True          # LLM-enrich digests with linked memories
+    max_sessions_per_user: int = 100  # retain last N sessions
+    auto_session_bus: bool = True
+    auto_checkpoint_events: List[str] = Field(
+        default_factory=lambda: ["tool_complete", "agent_pause", "agent_end"]
+    )
+    lane_inactivity_minutes: int = 240
+    max_lanes_per_user: int = 50
+    max_checkpoints_per_lane: int = 200
+    resume_statuses: List[str] = Field(default_factory=lambda: ["active", "paused"])
+    auto_trusted_agents: List[str] = Field(
+        default_factory=lambda: [
+            "pm",
+            "design",
+            "frontend",
+            "backend",
+            "claude-code",
+            "codex",
+            "chatgpt",
+        ]
+    )
+
+
 class ScopeConfig(BaseModel):
     """Configuration for scope-aware sharing weights."""
     agent_weight: float = 1.0
@@ -160,3 +186,4 @@ class MemoryConfig(BaseModel):
     graph: KnowledgeGraphConfig = Field(default_factory=lambda: KnowledgeGraphConfig())
     scene: SceneConfig = Field(default_factory=SceneConfig)
     profile: ProfileConfig = Field(default_factory=ProfileConfig)
+    handoff: HandoffConfig = Field(default_factory=HandoffConfig)

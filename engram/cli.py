@@ -9,7 +9,7 @@ import os
 import sys
 import shutil
 from pathlib import Path
-from typing import Dict, Any, Optional
+from typing import Dict, Any, Optional, List
 
 # TOML support (built-in since Python 3.11, fallback for earlier versions)
 try:
@@ -23,6 +23,114 @@ try:
     HAS_TOMLI_W = True
 except ImportError:
     HAS_TOMLI_W = False
+
+_CONTINUITY_START = "<!-- ENGRAM_CONTINUITY:START -->"
+_CONTINUITY_END = "<!-- ENGRAM_CONTINUITY:END -->"
+
+
+def _handoff_block(agent_id: str, agent_label: str) -> str:
+    return f"""\
+{_CONTINUITY_START}
+## Engram Continuity (Auto-Generated)
+
+Follow these rules for cross-agent continuity on every new task/thread.
+
+1) Before answering substantive repo/task questions, call `get_last_session`:
+- `user_id`: `"default"` unless provided
+- `requester_agent_id`: `"{agent_id}"`
+- `repo`: absolute workspace path
+- Include `agent_id` only when the user explicitly asks to continue from a specific source agent.
+
+2) If no handoff session exists, continue normally and use memory tools as needed.
+
+3) On major milestones and before pausing/ending, call `save_session_digest` with:
+- `task_summary`
+- `repo`
+- `status` (`"active"`, `"paused"`, or `"completed"`)
+- `decisions_made`, `files_touched`, `todos_remaining`
+- `blockers`, `key_commands`, `test_results` when available
+- `agent_id`: `"{agent_id}"`, `requester_agent_id`: `"{agent_id}"`
+
+4) Prefer Engram MCP handoff tools over shell/SQLite inspection for continuity.
+
+Target agent profile: `{agent_label}`.
+{_CONTINUITY_END}
+"""
+
+
+def _cursor_rule_content() -> str:
+    return """\
+---
+description: "Use Engram handoff tools automatically for continuity"
+alwaysApply: true
+---
+
+When an Engram MCP server is available:
+
+1) At the start of a new task/thread, call `get_last_session` first.
+   Do not pass `agent_id` unless the user explicitly asks for a specific source agent.
+2) Use the returned handoff context to continue work naturally.
+3) Before pausing or ending, call `save_session_digest`.
+4) Do not use shell/SQLite probing for continuity when MCP handoff tools exist.
+"""
+
+
+def _upsert_block_file(path: Path, block: str) -> bool:
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    start_idx = existing.find(_CONTINUITY_START)
+    end_idx = existing.find(_CONTINUITY_END)
+
+    if start_idx != -1 and end_idx != -1 and end_idx >= start_idx:
+        end_idx += len(_CONTINUITY_END)
+        updated = existing[:start_idx] + block + existing[end_idx:]
+    elif existing.strip():
+        updated = existing.rstrip() + "\n\n" + block + "\n"
+    else:
+        updated = block + "\n"
+
+    if updated == existing:
+        return False
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(updated, encoding="utf-8")
+    return True
+
+
+def _write_file_if_changed(path: Path, content: str) -> bool:
+    existing = path.read_text(encoding="utf-8") if path.exists() else ""
+    normalized = content if content.endswith("\n") else content + "\n"
+    if existing == normalized:
+        return False
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(normalized, encoding="utf-8")
+    return True
+
+
+def _install_workspace_continuity_rules(workspace: Path) -> List[str]:
+    updated: List[str] = []
+
+    targets = [
+        (workspace / "AGENTS.md", _handoff_block("codex", "Codex/agent-runner")),
+        (workspace / "CLAUDE.md", _handoff_block("claude-code", "Claude Code")),
+        (workspace / "CURSOR.md", _handoff_block("cursor", "Cursor")),
+    ]
+    for path, block in targets:
+        if _upsert_block_file(path, block):
+            updated.append(str(path))
+
+    cursor_rule_path = workspace / ".cursor" / "rules" / "engram-continuity.mdc"
+    if _write_file_if_changed(cursor_rule_path, _cursor_rule_content()):
+        updated.append(str(cursor_rule_path))
+
+    return updated
+
+
+def _config_with_agent_identity(server_config: Dict[str, Any], agent_id: str) -> Dict[str, Any]:
+    updated = dict(server_config)
+    env = dict(updated.get("env", {}))
+    env["ENGRAM_MCP_AGENT_ID"] = agent_id
+    updated["env"] = env
+    return updated
 
 
 def _read_toml(path: Path) -> Dict[str, Any]:
@@ -148,15 +256,18 @@ def install():
     json_targets = [
         {
             "name": "Claude Code (CLI)",
-            "path": Path.home() / ".claude.json"
+            "path": Path.home() / ".claude.json",
+            "agent_id": "claude-code",
         },
         {
             "name": "Claude Desktop (macOS)",
-            "path": Path.home() / "Library/Application Support/Claude/claude_desktop_config.json"
+            "path": Path.home() / "Library/Application Support/Claude/claude_desktop_config.json",
+            "agent_id": "claude-code",
         },
         {
             "name": "Cursor",
-            "path": Path.home() / ".cursor" / "mcp.json"
+            "path": Path.home() / ".cursor" / "mcp.json",
+            "agent_id": "cursor",
         },
     ]
 
@@ -164,7 +275,8 @@ def install():
     toml_targets = [
         {
             "name": "Codex CLI",
-            "path": Path.home() / ".codex" / "config.toml"
+            "path": Path.home() / ".codex" / "config.toml",
+            "agent_id": "codex",
         },
     ]
 
@@ -172,12 +284,14 @@ def install():
 
     # Install to JSON configs
     for target in json_targets:
-        if _update_config(target["name"], target["path"], "engram-memory", mcp_config):
+        target_config = _config_with_agent_identity(mcp_config, target["agent_id"])
+        if _update_config(target["name"], target["path"], "engram-memory", target_config):
             installed_count += 1
 
     # Install to TOML configs (Codex)
     for target in toml_targets:
-        if _update_codex_config(target["name"], target["path"], "engram-memory", mcp_config):
+        target_config = _config_with_agent_identity(mcp_config, target["agent_id"])
+        if _update_codex_config(target["name"], target["path"], "engram-memory", target_config):
             installed_count += 1
 
     # Install OpenClaw skill
@@ -191,6 +305,28 @@ def install():
     from engram.integrations.claude_code_plugin import deploy as _deploy_cc_plugin
     if _deploy_cc_plugin():
         installed_count += 1
+
+    # Install workspace-level continuity rules for agents (idempotent block updates)
+    skip_workspace_rules = os.environ.get("ENGRAM_INSTALL_SKIP_WORKSPACE_RULES", "").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
+    if not skip_workspace_rules:
+        cwd = Path.cwd()
+        if (cwd / ".git").exists() or (cwd / "pyproject.toml").exists():
+            updated_paths = _install_workspace_continuity_rules(cwd)
+            if updated_paths:
+                print("\nInstalled workspace continuity rules:")
+                for entry in updated_paths:
+                    print(f"  • {entry}")
+            else:
+                print("\nWorkspace continuity rules already up to date.")
+        else:
+            print("\nℹ️  Skipping workspace continuity rules (current directory is not a project root).")
+    else:
+        print("\nℹ️  Skipping workspace continuity rules (ENGRAM_INSTALL_SKIP_WORKSPACE_RULES is set).")
 
     if installed_count > 0:
         print("\n✨ Installation successful!")

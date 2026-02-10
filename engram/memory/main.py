@@ -24,6 +24,7 @@ from engram.core.category import CategoryProcessor, CategoryMatch
 from engram.core.graph import KnowledgeGraph
 from engram.core.scene import SceneProcessor
 from engram.core.profile import ProfileProcessor
+from engram.core.handoff import HandoffProcessor
 from engram.core.kernel import PersonalMemoryKernel
 from engram.core.policy import feature_enabled
 from engram.db.sqlite import SQLiteManager
@@ -170,6 +171,28 @@ class Memory(MemoryBase):
             )
         else:
             self.profile_processor = None
+
+        # Initialize HandoffProcessor
+        self.handoff_config = self.config.handoff
+        if self.handoff_config.enable_handoff:
+            self.handoff_processor = HandoffProcessor(
+                db=self.db,
+                memory=self,
+                embedder=self.embedder,
+                llm=self.llm,
+                config={
+                    "auto_enrich": self.handoff_config.auto_enrich,
+                    "max_sessions": self.handoff_config.max_sessions_per_user,
+                    "auto_session_bus": self.handoff_config.auto_session_bus,
+                    "lane_inactivity_minutes": self.handoff_config.lane_inactivity_minutes,
+                    "max_lanes_per_user": self.handoff_config.max_lanes_per_user,
+                    "max_checkpoints_per_lane": self.handoff_config.max_checkpoints_per_lane,
+                    "resume_statuses": self.handoff_config.resume_statuses,
+                    "auto_trusted_agents": self.handoff_config.auto_trusted_agents,
+                },
+            )
+        else:
+            self.handoff_processor = None
 
         # v2 Personal Memory Kernel orchestration layer.
         self.kernel = PersonalMemoryKernel(self)
@@ -2325,6 +2348,190 @@ class Memory(MemoryBase):
     def get_profile_memories(self, profile_id: str) -> List[Dict[str, Any]]:
         """Get memories linked to a profile."""
         return self.db.get_profile_memories(profile_id)
+
+    # =========================================================================
+    # Handoff Session Methods
+    # =========================================================================
+
+    def save_session_digest(
+        self,
+        user_id: str,
+        agent_id: str,
+        digest: Dict[str, Any],
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Save a session digest for cross-agent handoff."""
+        return self.kernel.save_session_digest(
+            user_id=user_id,
+            agent_id=agent_id,
+            digest=digest,
+            token=token,
+            requester_agent_id=requester_agent_id,
+        )
+
+    def get_last_session(
+        self,
+        user_id: str,
+        agent_id: Optional[str] = None,
+        repo: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Get the most recent session, optionally filtered by agent/repo.
+
+        Returns the full handoff context including linked memories.
+        """
+        return self.kernel.get_last_session(
+            user_id=user_id,
+            agent_id=agent_id,
+            repo=repo,
+            statuses=statuses,
+            token=token,
+            requester_agent_id=requester_agent_id,
+        )
+
+    def list_sessions(
+        self,
+        user_id: str,
+        agent_id: Optional[str] = None,
+        repo: Optional[str] = None,
+        status: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
+        limit: int = 20,
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """List handoff sessions with optional filters."""
+        return self.kernel.list_sessions(
+            user_id=user_id,
+            agent_id=agent_id,
+            repo=repo,
+            status=status,
+            statuses=statuses,
+            limit=limit,
+            token=token,
+            requester_agent_id=requester_agent_id,
+        )
+
+    def auto_resume_context(
+        self,
+        *,
+        user_id: str,
+        agent_id: Optional[str],
+        repo_path: Optional[str] = None,
+        branch: Optional[str] = None,
+        lane_type: str = "general",
+        objective: Optional[str] = None,
+        agent_role: Optional[str] = None,
+        namespace: str = "default",
+        statuses: Optional[List[str]] = None,
+        auto_create: bool = True,
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.kernel.auto_resume_context(
+            user_id=user_id,
+            agent_id=agent_id,
+            repo_path=repo_path,
+            branch=branch,
+            lane_type=lane_type,
+            objective=objective,
+            agent_role=agent_role,
+            namespace=namespace,
+            statuses=statuses,
+            auto_create=auto_create,
+            token=token,
+            requester_agent_id=requester_agent_id,
+        )
+
+    def auto_checkpoint(
+        self,
+        *,
+        user_id: str,
+        agent_id: str,
+        payload: Dict[str, Any],
+        event_type: str = "tool_complete",
+        repo_path: Optional[str] = None,
+        branch: Optional[str] = None,
+        lane_id: Optional[str] = None,
+        lane_type: str = "general",
+        objective: Optional[str] = None,
+        agent_role: Optional[str] = None,
+        namespace: str = "default",
+        confidentiality_scope: str = "work",
+        expected_version: Optional[int] = None,
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.kernel.auto_checkpoint(
+            user_id=user_id,
+            agent_id=agent_id,
+            payload=payload,
+            event_type=event_type,
+            repo_path=repo_path,
+            branch=branch,
+            lane_id=lane_id,
+            lane_type=lane_type,
+            objective=objective,
+            agent_role=agent_role,
+            namespace=namespace,
+            confidentiality_scope=confidentiality_scope,
+            expected_version=expected_version,
+            token=token,
+            requester_agent_id=requester_agent_id,
+        )
+
+    def finalize_lane(
+        self,
+        *,
+        user_id: str,
+        agent_id: str,
+        lane_id: str,
+        status: str = "paused",
+        payload: Optional[Dict[str, Any]] = None,
+        repo_path: Optional[str] = None,
+        branch: Optional[str] = None,
+        agent_role: Optional[str] = None,
+        namespace: str = "default",
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        return self.kernel.finalize_lane(
+            user_id=user_id,
+            agent_id=agent_id,
+            lane_id=lane_id,
+            status=status,
+            payload=payload,
+            repo_path=repo_path,
+            branch=branch,
+            agent_role=agent_role,
+            namespace=namespace,
+            token=token,
+            requester_agent_id=requester_agent_id,
+        )
+
+    def list_handoff_lanes(
+        self,
+        *,
+        user_id: str,
+        repo_path: Optional[str] = None,
+        status: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
+        limit: int = 20,
+        token: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        return self.kernel.list_handoff_lanes(
+            user_id=user_id,
+            repo_path=repo_path,
+            status=status,
+            statuses=statuses,
+            limit=limit,
+            token=token,
+            requester_agent_id=requester_agent_id,
+        )
 
     # =========================================================================
     # Dashboard / Visualization Methods

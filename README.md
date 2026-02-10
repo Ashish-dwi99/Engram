@@ -11,8 +11,12 @@
 </h3>
 
 <p align="center">
-  A user-owned memory store that any agent can plug into to become instantly personalized.<br>
-  Agents read via scoped retrieval. Writes land in staging until you approve.
+  Hit a rate limit in Claude Code? Open Codex — it already knows what you were doing.<br>
+  One memory kernel. Shared across every agent. Bio-inspired forgetting. Staged writes. Episodic recall.
+</p>
+
+<p align="center">
+  <b>⚠ Early-stage software — not recommended for production use. APIs may change. Use at your own risk.</b>
 </p>
 
 <p align="center">
@@ -36,23 +40,24 @@
 
 ## Why Engram
 
-Every AI agent you use starts with amnesia. Your coding assistant forgets your preferences between sessions. Your planning agent has no idea what your research agent discovered yesterday. You end up re-explaining context that should already be known.
+Every AI agent you use starts with amnesia. But the real pain isn't just forgetting — it's what happens when you **switch agents**.
 
-**Engram fixes this.** It's a Personal Memory Kernel (PMK) — a single memory store that sits between you and all your agents. Any agent can plug in via MCP or REST to become instantly personalized, without you having to repeat yourself.
+You're 40 minutes into a refactor with Claude Code. You've touched six files, picked a migration strategy, mapped out the remaining TODOs. Then you hit a rate limit. Or your terminal crashes. Or you just need Codex for the next part. So you switch — and the new agent has **zero context**. You re-paste file paths, re-explain decisions, re-describe the plan. Half the time the new agent contradicts something you'd already decided.
 
-But unlike "store everything forever" approaches, Engram treats agents as **untrusted writers**. Writes land in staging. You control what sticks. And memories that stop being useful fade away naturally — just like biological memory.
+**Engram fixes this.** It's a Personal Memory Kernel (PMK) — one memory store shared across all your agents. When Claude Code pauses, it saves a session digest. When Codex picks up, it loads that digest and continues where you left off. No re-explanation. No cold starts.
 
-| Capability | Other Memory Layers | **Engram** |
-|:-----------|:--------------------|:-----------|
-| Bio-inspired forgetting | No | **Ebbinghaus decay curve** |
-| Untrusted agent writes | Store directly | **Staging + verification + conflict stash** |
-| Episodic narrative memory | No | **CAST scenes (time/place/topic)** |
-| Multi-modal encoding | Rare | **5 retrieval paths (EchoMem)** |
-| Cross-agent memory sharing | Per-agent silos | **Scoped retrieval with masking** |
-| Knowledge graph | Sometimes | **Entity extraction + linking** |
+But Engram isn't just a handoff bus. It solves four fundamental problems with how AI memory works today:
+
+| Problem | Other Memory Layers | **Engram** |
+|:--------|:--------------------|:-----------|
+| **Switching agents = cold start** | Manual copy/paste context | **Handoff bus — session digests, auto-resume** |
+| **Nobody forgets** | Store everything forever | **Ebbinghaus decay curve, ~45% less storage** |
+| **Agents write with no oversight** | Store directly | **Staging + verification + trust scoring** |
+| **No episodic memory** | Vector search only | **CAST scenes (time/place/topic)** |
+| Multi-modal encoding | Single embedding | **5 retrieval paths (EchoMem)** |
+| Cross-agent memory sharing | Per-agent silos | **Scoped retrieval with all-but-mask privacy** |
 | Reference-aware decay | No | **If other agents use it, don't delete it** |
-| Hybrid search | Vector only | **Semantic + keyword + episodic** |
-| Storage efficiency | Store everything | **~45% less** |
+| Knowledge graph | Sometimes | **Entity extraction + linking** |
 | MCP + REST | One or the other | **Both, plug-and-play** |
 | Local-first | Cloud-required | **127.0.0.1:8100 by default** |
 
@@ -127,9 +132,10 @@ docker compose up -d               # API at http://localhost:8100
 
 Engram is a **Personal Memory Kernel** — not just a vector store with an API. It has opinions about how memory should work:
 
-1. **Agents are untrusted writers.** Every write is a proposal that lands in staging. Trusted agents can auto-merge; untrusted ones wait for approval.
+1. **Switching agents shouldn't mean starting over.** When an agent pauses — rate limit, crash, tool switch — it saves a session digest. The next agent loads it and continues. Zero re-explanation.
 2. **Memory has a lifecycle.** New memories start in short-term (SML), get promoted to long-term (LML) through repeated access, and fade away through Ebbinghaus decay if unused.
-3. **Scoping is mandatory.** Every memory is scoped by user. Agents see only what they're allowed to — everything else gets the "all but mask" treatment (structure visible, details redacted).
+3. **Agents are untrusted writers.** Every write is a proposal that lands in staging. Trusted agents can auto-merge; untrusted ones wait for approval.
+4. **Scoping is mandatory.** Every memory is scoped by user. Agents see only what they're allowed to — everything else gets the "all but mask" treatment (structure visible, details redacted).
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -192,7 +198,7 @@ Engram is a **Personal Memory Kernel** — not just a vector store with an API. 
 
 ### The Memory Stack
 
-Engram combines four bio-inspired memory systems, each handling a different aspect of how humans actually remember:
+Engram combines five systems, each handling a different aspect of how memory should work:
 
 #### FadeMem — Decay & Consolidation
 
@@ -241,6 +247,21 @@ Scene: "Engram v2 architecture session"
   Synopsis:   "Designed staged writes and scoped retrieval..."
   Views:      [view_1, view_2, view_3]
   Memories:   [mem_1, mem_2]  ← semantic facts extracted
+```
+
+#### Handoff Bus — Cross-Agent Continuity
+
+When an agent pauses work — rate limit, crash, you switch tools — it saves a session digest: task summary, decisions made, files touched, remaining TODOs, blockers. The next agent calls `get_last_session` and gets the full context. No re-explanation needed.
+
+```
+Claude Code (rate limited)
+  → save_session_digest(task, decisions, files, todos, blockers)
+  → Session stored in handoff bus
+
+Codex (picks up)
+  → get_last_session(repo="/my-project")
+  → Gets full context: task, decisions, files, todos
+  → Continues where Claude Code stopped
 ```
 
 ---
@@ -300,6 +321,16 @@ Engram is plug-and-play. Run `engram install` and it auto-configures everything:
 engram install    # Writes MCP config to ~/.claude.json
 ```
 
+`engram install` also bootstraps workspace continuity rules (in your current
+project directory) so agents call handoff tools automatically:
+
+- `AGENTS.md`
+- `CLAUDE.md`
+- `CURSOR.md`
+- `.cursor/rules/engram-continuity.mdc`
+
+Set `ENGRAM_INSTALL_SKIP_WORKSPACE_RULES=1` to disable this behavior.
+
 **MCP tools** give Claude reactive memory — it stores and retrieves when you ask.
 
 The optional **Claude Code plugin** makes memory **proactive** — relevant context is injected automatically before Claude sees your message:
@@ -340,10 +371,12 @@ Claude: Based on your preferences, I'd recommend TypeScript...
 ### Cursor
 
 `engram install` writes MCP config to `~/.cursor/mcp.json`. Restart Cursor to load.
+It also sets `ENGRAM_MCP_AGENT_ID=cursor` for deterministic handoff identity.
 
 ### OpenAI Codex
 
 `engram install` writes MCP config to `~/.codex/config.toml`. Restart Codex to load.
+It also sets `ENGRAM_MCP_AGENT_ID=codex` for deterministic handoff identity.
 
 ### OpenClaw
 
@@ -379,6 +412,9 @@ Once configured, your agent has access to these tools:
 | `list_pending_commits` | Inspect staged write queue |
 | `resolve_conflict` | Resolve invariant conflicts (accept proposed or keep existing) |
 | `search_scenes` / `get_scene` | Episodic CAST scene retrieval with masking policy |
+| `save_session_digest` | Save handoff context when pausing or switching agents |
+| `get_last_session` | Load session context from the last active agent |
+| `list_sessions` | Browse handoff history across agents |
 
 ---
 
@@ -432,6 +468,19 @@ curl "http://localhost:8100/v1/trust?user_id=u123&agent_id=planner"
 # 7. Sleep-cycle maintenance
 curl -X POST http://localhost:8100/v1/sleep/run \
   -d '{"user_id": "u123", "apply_decay": true, "cleanup_stale_refs": true}'
+
+# 8. Zero-intervention handoff (session bus)
+curl -X POST http://localhost:8100/v1/handoff/resume \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"u123","agent_id":"frontend","repo_path":"/repo","objective":"continue latest task"}'
+
+curl -X POST http://localhost:8100/v1/handoff/checkpoint \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"u123","agent_id":"frontend","repo_path":"/repo","task_summary":"implemented card layout"}'
+
+curl "http://localhost:8100/v1/handoff/lanes?user_id=u123"
 ```
 
 ### Python SDK
@@ -796,7 +845,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 <p align="center">
-  <b>Your agents forget everything between sessions. Engram fixes that.</b>
+  <b>Switch agents without losing context. Stop re-explaining yourself.</b>
   <br><br>
   <a href="https://github.com/Ashish-dwi99/Engram">GitHub</a> &middot;
   <a href="https://github.com/Ashish-dwi99/Engram/issues">Issues</a> &middot;

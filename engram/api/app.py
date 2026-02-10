@@ -28,6 +28,8 @@ from engram.api.schemas import (
     CommitResolutionRequest,
     ConflictResolutionRequest,
     DailyDigestResponse,
+    HandoffCheckpointRequest,
+    HandoffResumeRequest,
     NamespaceDeclareRequest,
     NamespacePermissionRequest,
     SceneSearchRequest,
@@ -176,6 +178,96 @@ async def create_session(request: SessionCreateRequest, http_request: Request):
         return SessionCreateResponse(**payload)
     except PermissionError as exc:
         raise HTTPException(status_code=403, detail=str(exc))
+
+
+@app.post("/v1/handoff/resume")
+@app.post("/v1/handoff/resume/")
+async def handoff_resume(request: HandoffResumeRequest, http_request: Request):
+    token = get_token_from_request(http_request)
+    kernel = get_kernel()
+    try:
+        return kernel.auto_resume_context(
+            user_id=request.user_id,
+            agent_id=request.agent_id,
+            repo_path=request.repo_path,
+            branch=request.branch,
+            lane_type=request.lane_type,
+            objective=request.objective,
+            agent_role=request.agent_role,
+            namespace=request.namespace,
+            statuses=request.statuses,
+            auto_create=request.auto_create,
+            token=token,
+            requester_agent_id=request.requester_agent_id,
+        )
+    except PermissionError as exc:
+        raise require_session_error(exc)
+
+
+@app.post("/v1/handoff/checkpoint")
+@app.post("/v1/handoff/checkpoint/")
+async def handoff_checkpoint(request: HandoffCheckpointRequest, http_request: Request):
+    token = get_token_from_request(http_request)
+    kernel = get_kernel()
+    payload = {
+        "status": request.status,
+        "task_summary": request.task_summary,
+        "decisions_made": request.decisions_made,
+        "files_touched": request.files_touched,
+        "todos_remaining": request.todos_remaining,
+        "blockers": request.blockers,
+        "key_commands": request.key_commands,
+        "test_results": request.test_results,
+        "context_snapshot": request.context_snapshot,
+    }
+    try:
+        return kernel.auto_checkpoint(
+            user_id=request.user_id,
+            agent_id=request.agent_id,
+            payload=payload,
+            event_type=request.event_type,
+            repo_path=request.repo_path,
+            branch=request.branch,
+            lane_id=request.lane_id,
+            lane_type=request.lane_type,
+            objective=request.objective,
+            agent_role=request.agent_role,
+            namespace=request.namespace,
+            confidentiality_scope=request.confidentiality_scope,
+            expected_version=request.expected_version,
+            token=token,
+            requester_agent_id=request.requester_agent_id,
+        )
+    except PermissionError as exc:
+        raise require_session_error(exc)
+
+
+@app.get("/v1/handoff/lanes")
+@app.get("/v1/handoff/lanes/")
+async def list_handoff_lanes(
+    http_request: Request,
+    user_id: str = Query(default="default"),
+    repo_path: Optional[str] = Query(default=None),
+    status: Optional[str] = Query(default=None),
+    statuses: Optional[List[str]] = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=200),
+    requester_agent_id: Optional[str] = Query(default=None),
+):
+    token = get_token_from_request(http_request)
+    kernel = get_kernel()
+    try:
+        lanes = kernel.list_handoff_lanes(
+            user_id=user_id,
+            repo_path=repo_path,
+            status=status,
+            statuses=statuses,
+            limit=limit,
+            token=token,
+            requester_agent_id=requester_agent_id,
+        )
+        return {"lanes": lanes, "count": len(lanes)}
+    except PermissionError as exc:
+        raise require_session_error(exc)
 
 
 @app.post("/v1/search", response_model=SearchResultResponse)

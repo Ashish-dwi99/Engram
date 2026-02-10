@@ -353,6 +353,42 @@ class SQLiteManager:
                 CREATE INDEX IF NOT EXISTS idx_ns_permissions_agent ON namespace_permissions(user_id, agent_id);
                 CREATE INDEX IF NOT EXISTS idx_ns_permissions_namespace ON namespace_permissions(namespace_id);
             """,
+            "v2_011": """
+                CREATE TABLE IF NOT EXISTS handoff_sessions (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    repo TEXT,
+                    status TEXT NOT NULL DEFAULT 'paused'
+                        CHECK (status IN ('active', 'paused', 'completed', 'abandoned')),
+                    task_summary TEXT NOT NULL,
+                    decisions_made TEXT DEFAULT '[]',
+                    files_touched TEXT DEFAULT '[]',
+                    todos_remaining TEXT DEFAULT '[]',
+                    context_snapshot TEXT,
+                    linked_memory_ids TEXT DEFAULT '[]',
+                    linked_scene_ids TEXT DEFAULT '[]',
+                    started_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    ended_at TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_handoff_user ON handoff_sessions(user_id);
+                CREATE INDEX IF NOT EXISTS idx_handoff_agent ON handoff_sessions(agent_id);
+                CREATE INDEX IF NOT EXISTS idx_handoff_repo ON handoff_sessions(repo);
+                CREATE INDEX IF NOT EXISTS idx_handoff_status ON handoff_sessions(status);
+                CREATE INDEX IF NOT EXISTS idx_handoff_updated ON handoff_sessions(updated_at DESC);
+
+                CREATE TABLE IF NOT EXISTS handoff_session_memories (
+                    session_id TEXT NOT NULL,
+                    memory_id TEXT NOT NULL,
+                    relevance_score REAL DEFAULT 1.0,
+                    PRIMARY KEY (session_id, memory_id),
+                    FOREIGN KEY (session_id) REFERENCES handoff_sessions(id),
+                    FOREIGN KEY (memory_id) REFERENCES memories(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_hsm_session ON handoff_session_memories(session_id);
+            """,
             "v2_010": """
                 CREATE TABLE IF NOT EXISTS agent_policies (
                     id TEXT PRIMARY KEY,
@@ -367,6 +403,87 @@ class SQLiteManager:
                 );
                 CREATE INDEX IF NOT EXISTS idx_agent_policies_user ON agent_policies(user_id);
                 CREATE INDEX IF NOT EXISTS idx_agent_policies_agent ON agent_policies(agent_id);
+            """,
+            "v2_012": """
+                CREATE TABLE IF NOT EXISTS handoff_lanes (
+                    id TEXT PRIMARY KEY,
+                    user_id TEXT NOT NULL,
+                    repo_id TEXT,
+                    repo_path TEXT,
+                    branch TEXT,
+                    lane_type TEXT DEFAULT 'general',
+                    status TEXT NOT NULL DEFAULT 'active'
+                        CHECK (status IN ('active', 'paused', 'completed', 'abandoned')),
+                    objective TEXT,
+                    current_state TEXT DEFAULT '{}',
+                    namespace TEXT DEFAULT 'default',
+                    confidentiality_scope TEXT DEFAULT 'work',
+                    last_checkpoint_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    version INTEGER DEFAULT 0,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_handoff_lanes_user ON handoff_lanes(user_id);
+                CREATE INDEX IF NOT EXISTS idx_handoff_lanes_repo ON handoff_lanes(repo_id);
+                CREATE INDEX IF NOT EXISTS idx_handoff_lanes_status ON handoff_lanes(status);
+                CREATE INDEX IF NOT EXISTS idx_handoff_lanes_recent ON handoff_lanes(last_checkpoint_at DESC, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS handoff_checkpoints (
+                    id TEXT PRIMARY KEY,
+                    lane_id TEXT NOT NULL,
+                    user_id TEXT NOT NULL,
+                    agent_id TEXT NOT NULL,
+                    agent_role TEXT,
+                    event_type TEXT DEFAULT 'tool_complete',
+                    task_summary TEXT,
+                    decisions_made TEXT DEFAULT '[]',
+                    files_touched TEXT DEFAULT '[]',
+                    todos_remaining TEXT DEFAULT '[]',
+                    blockers TEXT DEFAULT '[]',
+                    key_commands TEXT DEFAULT '[]',
+                    test_results TEXT DEFAULT '[]',
+                    merge_conflicts TEXT DEFAULT '[]',
+                    context_snapshot TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (lane_id) REFERENCES handoff_lanes(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_handoff_cp_lane ON handoff_checkpoints(lane_id, created_at DESC);
+                CREATE INDEX IF NOT EXISTS idx_handoff_cp_user ON handoff_checkpoints(user_id, created_at DESC);
+
+                CREATE TABLE IF NOT EXISTS handoff_checkpoint_memories (
+                    checkpoint_id TEXT NOT NULL,
+                    memory_id TEXT NOT NULL,
+                    relevance_score REAL DEFAULT 1.0,
+                    PRIMARY KEY (checkpoint_id, memory_id),
+                    FOREIGN KEY (checkpoint_id) REFERENCES handoff_checkpoints(id),
+                    FOREIGN KEY (memory_id) REFERENCES memories(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_hcm_checkpoint ON handoff_checkpoint_memories(checkpoint_id);
+
+                CREATE TABLE IF NOT EXISTS handoff_checkpoint_scenes (
+                    checkpoint_id TEXT NOT NULL,
+                    scene_id TEXT NOT NULL,
+                    relevance_score REAL DEFAULT 1.0,
+                    PRIMARY KEY (checkpoint_id, scene_id),
+                    FOREIGN KEY (checkpoint_id) REFERENCES handoff_checkpoints(id),
+                    FOREIGN KEY (scene_id) REFERENCES scenes(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_hcs_checkpoint ON handoff_checkpoint_scenes(checkpoint_id);
+
+                CREATE TABLE IF NOT EXISTS handoff_lane_conflicts (
+                    id TEXT PRIMARY KEY,
+                    lane_id TEXT NOT NULL,
+                    checkpoint_id TEXT,
+                    user_id TEXT NOT NULL,
+                    conflict_fields TEXT DEFAULT '[]',
+                    previous_state TEXT DEFAULT '{}',
+                    incoming_state TEXT DEFAULT '{}',
+                    resolved_state TEXT DEFAULT '{}',
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    FOREIGN KEY (lane_id) REFERENCES handoff_lanes(id),
+                    FOREIGN KEY (checkpoint_id) REFERENCES handoff_checkpoints(id)
+                );
+                CREATE INDEX IF NOT EXISTS idx_handoff_conflicts_lane ON handoff_lane_conflicts(lane_id, created_at DESC);
             """,
         }
 
@@ -399,6 +516,14 @@ class SQLiteManager:
         self._migrate_add_column_conn(conn, "sessions", "namespaces", "TEXT DEFAULT '[]'")
         self._migrate_add_column_conn(conn, "memory_subscribers", "last_seen_at", "TEXT")
         self._migrate_add_column_conn(conn, "memory_subscribers", "expires_at", "TEXT")
+        self._migrate_add_column_conn(conn, "handoff_sessions", "repo_id", "TEXT")
+        self._migrate_add_column_conn(conn, "handoff_sessions", "blockers", "TEXT DEFAULT '[]'")
+        self._migrate_add_column_conn(conn, "handoff_sessions", "key_commands", "TEXT DEFAULT '[]'")
+        self._migrate_add_column_conn(conn, "handoff_sessions", "test_results", "TEXT DEFAULT '[]'")
+        self._migrate_add_column_conn(conn, "handoff_sessions", "lane_id", "TEXT")
+        self._migrate_add_column_conn(conn, "handoff_sessions", "last_checkpoint_at", "TEXT")
+        self._migrate_add_column_conn(conn, "handoff_sessions", "namespace", "TEXT DEFAULT 'default'")
+        self._migrate_add_column_conn(conn, "handoff_sessions", "confidentiality_scope", "TEXT DEFAULT 'work'")
 
         conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_subscribers_expires ON memory_subscribers(expires_at)")
 
@@ -436,6 +561,18 @@ class SQLiteManager:
             UPDATE sessions
             SET namespaces = '[]'
             WHERE namespaces IS NULL OR namespaces = ''
+            """
+        )
+        conn.execute(
+            """
+            UPDATE handoff_sessions
+            SET blockers = COALESCE(NULLIF(blockers, ''), '[]'),
+                key_commands = COALESCE(NULLIF(key_commands, ''), '[]'),
+                test_results = COALESCE(NULLIF(test_results, ''), '[]'),
+                namespace = COALESCE(NULLIF(namespace, ''), 'default'),
+                confidentiality_scope = COALESCE(NULLIF(confidentiality_scope, ''), 'work'),
+                repo_id = COALESCE(NULLIF(repo_id, ''), repo),
+                last_checkpoint_at = COALESCE(last_checkpoint_at, updated_at, created_at)
             """
         )
         conn.execute(
@@ -2226,6 +2363,10 @@ class SQLiteManager:
                     SELECT user_id FROM sessions
                     UNION ALL
                     SELECT user_id FROM proposal_commits
+                    UNION ALL
+                    SELECT user_id FROM handoff_sessions
+                    UNION ALL
+                    SELECT user_id FROM handoff_lanes
                 )
                 WHERE user_id IS NOT NULL AND user_id != ''
                 ORDER BY user_id
@@ -2372,6 +2513,581 @@ class SQLiteManager:
                 (limit,),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    # =========================================================================
+    # Handoff session methods (legacy compatibility)
+    # =========================================================================
+
+    def add_handoff_session(self, data: Dict[str, Any]) -> str:
+        session_id = data.get("id", str(uuid.uuid4()))
+        now = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO handoff_sessions (
+                    id, user_id, agent_id, repo, repo_id, status, task_summary,
+                    decisions_made, files_touched, todos_remaining, blockers, key_commands, test_results,
+                    context_snapshot, linked_memory_ids, linked_scene_ids, lane_id,
+                    started_at, ended_at, last_checkpoint_at,
+                    namespace, confidentiality_scope,
+                    created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    session_id,
+                    data.get("user_id", "default"),
+                    data.get("agent_id", "unknown"),
+                    data.get("repo"),
+                    data.get("repo_id"),
+                    data.get("status", "paused"),
+                    data.get("task_summary", ""),
+                    json.dumps(data.get("decisions_made", [])),
+                    json.dumps(data.get("files_touched", [])),
+                    json.dumps(data.get("todos_remaining", [])),
+                    json.dumps(data.get("blockers", [])),
+                    json.dumps(data.get("key_commands", [])),
+                    json.dumps(data.get("test_results", [])),
+                    data.get("context_snapshot"),
+                    json.dumps(data.get("linked_memory_ids", [])),
+                    json.dumps(data.get("linked_scene_ids", [])),
+                    data.get("lane_id"),
+                    data.get("started_at", now),
+                    data.get("ended_at"),
+                    data.get("last_checkpoint_at", data.get("updated_at", now)),
+                    data.get("namespace", "default"),
+                    data.get("confidentiality_scope", "work"),
+                    data.get("created_at", now),
+                    data.get("updated_at", now),
+                ),
+            )
+        return session_id
+
+    def get_handoff_session(self, session_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM handoff_sessions WHERE id = ?",
+                (session_id,),
+            ).fetchone()
+            if row:
+                return self._handoff_row_to_dict(row)
+        return None
+
+    def get_last_handoff_session(
+        self,
+        user_id: str,
+        agent_id: Optional[str] = None,
+        repo: Optional[str] = None,
+        repo_id: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
+    ) -> Optional[Dict[str, Any]]:
+        query = "SELECT * FROM handoff_sessions WHERE user_id = ?"
+        params: List[Any] = [user_id]
+        if agent_id:
+            query += " AND agent_id = ?"
+            params.append(agent_id)
+        if repo_id:
+            query += " AND repo_id = ?"
+            params.append(repo_id)
+        elif repo:
+            query += " AND repo = ?"
+            params.append(repo)
+        if statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            query += f" AND status IN ({placeholders})"
+            params.extend(statuses)
+        query += " ORDER BY COALESCE(last_checkpoint_at, updated_at, created_at) DESC, created_at DESC LIMIT 1"
+        with self._get_connection() as conn:
+            row = conn.execute(query, params).fetchone()
+            if row:
+                return self._handoff_row_to_dict(row)
+        return None
+
+    def list_handoff_sessions(
+        self,
+        user_id: str,
+        agent_id: Optional[str] = None,
+        repo: Optional[str] = None,
+        repo_id: Optional[str] = None,
+        status: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM handoff_sessions WHERE user_id = ?"
+        params: List[Any] = [user_id]
+        if agent_id:
+            query += " AND agent_id = ?"
+            params.append(agent_id)
+        if repo_id:
+            query += " AND repo_id = ?"
+            params.append(repo_id)
+        elif repo:
+            query += " AND repo = ?"
+            params.append(repo)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        elif statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            query += f" AND status IN ({placeholders})"
+            params.extend(statuses)
+        query += " ORDER BY COALESCE(last_checkpoint_at, updated_at, created_at) DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [self._handoff_row_to_dict(row) for row in rows]
+
+    def update_handoff_session(self, session_id: str, updates: Dict[str, Any]) -> bool:
+        set_clauses = []
+        params: List[Any] = []
+        json_fields = {
+            "decisions_made",
+            "files_touched",
+            "todos_remaining",
+            "blockers",
+            "key_commands",
+            "test_results",
+            "linked_memory_ids",
+            "linked_scene_ids",
+        }
+        for key, value in updates.items():
+            if key in json_fields:
+                value = json.dumps(value)
+            set_clauses.append(f"{key} = ?")
+            params.append(value)
+        if not set_clauses:
+            return False
+        set_clauses.append("updated_at = ?")
+        params.append(datetime.utcnow().isoformat())
+        params.append(session_id)
+        with self._get_connection() as conn:
+            cursor = conn.execute(
+                f"UPDATE handoff_sessions SET {', '.join(set_clauses)} WHERE id = ?",
+                params,
+            )
+            return cursor.rowcount > 0
+
+    def delete_handoff_sessions(self, session_ids: List[str]) -> int:
+        ids = [str(value) for value in (session_ids or []) if str(value).strip()]
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        with self._get_connection() as conn:
+            conn.execute(
+                f"DELETE FROM handoff_session_memories WHERE session_id IN ({placeholders})",
+                ids,
+            )
+            cursor = conn.execute(
+                f"DELETE FROM handoff_sessions WHERE id IN ({placeholders})",
+                ids,
+            )
+            return cursor.rowcount
+
+    def prune_handoff_sessions(self, user_id: str, max_sessions: int) -> int:
+        limit_value = max(0, int(max_sessions))
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM handoff_sessions
+                WHERE user_id = ?
+                ORDER BY COALESCE(last_checkpoint_at, updated_at, created_at) DESC, created_at DESC
+                """,
+                (user_id,),
+            ).fetchall()
+        session_ids = [str(row["id"]) for row in rows]
+        stale_ids = session_ids[limit_value:]
+        return self.delete_handoff_sessions(stale_ids)
+
+    def add_handoff_session_memory(self, session_id: str, memory_id: str, relevance_score: float = 1.0) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                "INSERT OR IGNORE INTO handoff_session_memories (session_id, memory_id, relevance_score) VALUES (?, ?, ?)",
+                (session_id, memory_id, relevance_score),
+            )
+
+    def get_handoff_session_memories(self, session_id: str) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT m.*, hsm.relevance_score FROM memories m
+                JOIN handoff_session_memories hsm ON m.id = hsm.memory_id
+                WHERE hsm.session_id = ? AND m.tombstone = 0
+                ORDER BY hsm.relevance_score DESC
+                """,
+                (session_id,),
+            ).fetchall()
+            return [self._row_to_dict(row) for row in rows]
+
+    # =========================================================================
+    # Handoff lane + checkpoint methods (session bus)
+    # =========================================================================
+
+    def add_handoff_lane(self, data: Dict[str, Any]) -> str:
+        lane_id = data.get("id", str(uuid.uuid4()))
+        now = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO handoff_lanes (
+                    id, user_id, repo_id, repo_path, branch, lane_type, status,
+                    objective, current_state, namespace, confidentiality_scope,
+                    last_checkpoint_at, version, created_at, updated_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    lane_id,
+                    data.get("user_id", "default"),
+                    data.get("repo_id"),
+                    data.get("repo_path"),
+                    data.get("branch"),
+                    data.get("lane_type", "general"),
+                    data.get("status", "active"),
+                    data.get("objective"),
+                    json.dumps(data.get("current_state", {})),
+                    data.get("namespace", "default"),
+                    data.get("confidentiality_scope", "work"),
+                    data.get("last_checkpoint_at", now),
+                    int(data.get("version", 0)),
+                    data.get("created_at", now),
+                    data.get("updated_at", now),
+                ),
+            )
+        return lane_id
+
+    def get_handoff_lane(self, lane_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM handoff_lanes WHERE id = ?",
+                (lane_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return self._handoff_lane_row_to_dict(row)
+
+    def list_handoff_lanes(
+        self,
+        user_id: str,
+        *,
+        repo_id: Optional[str] = None,
+        status: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
+        limit: int = 20,
+    ) -> List[Dict[str, Any]]:
+        query = "SELECT * FROM handoff_lanes WHERE user_id = ?"
+        params: List[Any] = [user_id]
+        if repo_id:
+            query += " AND repo_id = ?"
+            params.append(repo_id)
+        if status:
+            query += " AND status = ?"
+            params.append(status)
+        elif statuses:
+            placeholders = ", ".join("?" for _ in statuses)
+            query += f" AND status IN ({placeholders})"
+            params.extend(statuses)
+        query += " ORDER BY COALESCE(last_checkpoint_at, created_at) DESC, created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+        return [self._handoff_lane_row_to_dict(row) for row in rows]
+
+    def update_handoff_lane(
+        self,
+        lane_id: str,
+        updates: Dict[str, Any],
+        *,
+        expected_version: Optional[int] = None,
+    ) -> bool:
+        set_clauses = []
+        params: List[Any] = []
+        for key, value in updates.items():
+            if key == "current_state" and not isinstance(value, str):
+                value = json.dumps(value)
+            set_clauses.append(f"{key} = ?")
+            params.append(value)
+        if not set_clauses:
+            return False
+        set_clauses.append("updated_at = ?")
+        params.append(datetime.utcnow().isoformat())
+        query = f"UPDATE handoff_lanes SET {', '.join(set_clauses)} WHERE id = ?"
+        params.append(lane_id)
+        if expected_version is not None:
+            query += " AND version = ?"
+            params.append(int(expected_version))
+        with self._get_connection() as conn:
+            cursor = conn.execute(query, params)
+            return cursor.rowcount > 0
+
+    def delete_handoff_lanes(self, lane_ids: List[str]) -> int:
+        ids = [str(value) for value in (lane_ids or []) if str(value).strip()]
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        with self._get_connection() as conn:
+            checkpoint_rows = conn.execute(
+                f"SELECT id FROM handoff_checkpoints WHERE lane_id IN ({placeholders})",
+                ids,
+            ).fetchall()
+            checkpoint_ids = [str(row["id"]) for row in checkpoint_rows]
+        if checkpoint_ids:
+            self.delete_handoff_checkpoints(checkpoint_ids)
+        with self._get_connection() as conn:
+            conn.execute(
+                f"DELETE FROM handoff_lane_conflicts WHERE lane_id IN ({placeholders})",
+                ids,
+            )
+            cursor = conn.execute(
+                f"DELETE FROM handoff_lanes WHERE id IN ({placeholders})",
+                ids,
+            )
+            return cursor.rowcount
+
+    def prune_handoff_lanes(self, user_id: str, max_lanes: int) -> int:
+        limit_value = max(0, int(max_lanes))
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT id FROM handoff_lanes
+                WHERE user_id = ?
+                ORDER BY COALESCE(last_checkpoint_at, created_at) DESC, created_at DESC
+                """,
+                (user_id,),
+            ).fetchall()
+        lane_ids = [str(row["id"]) for row in rows]
+        stale_ids = lane_ids[limit_value:]
+        return self.delete_handoff_lanes(stale_ids)
+
+    def add_handoff_checkpoint(self, data: Dict[str, Any]) -> str:
+        checkpoint_id = data.get("id", str(uuid.uuid4()))
+        now = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO handoff_checkpoints (
+                    id, lane_id, user_id, agent_id, agent_role, event_type, task_summary,
+                    decisions_made, files_touched, todos_remaining, blockers, key_commands,
+                    test_results, merge_conflicts, context_snapshot, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    checkpoint_id,
+                    data.get("lane_id"),
+                    data.get("user_id", "default"),
+                    data.get("agent_id", "unknown"),
+                    data.get("agent_role"),
+                    data.get("event_type", "tool_complete"),
+                    data.get("task_summary"),
+                    json.dumps(data.get("decisions_made", [])),
+                    json.dumps(data.get("files_touched", [])),
+                    json.dumps(data.get("todos_remaining", [])),
+                    json.dumps(data.get("blockers", [])),
+                    json.dumps(data.get("key_commands", [])),
+                    json.dumps(data.get("test_results", [])),
+                    json.dumps(data.get("merge_conflicts", [])),
+                    data.get("context_snapshot"),
+                    data.get("created_at", now),
+                ),
+            )
+        return checkpoint_id
+
+    def get_handoff_checkpoint(self, checkpoint_id: str) -> Optional[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            row = conn.execute(
+                "SELECT * FROM handoff_checkpoints WHERE id = ?",
+                (checkpoint_id,),
+            ).fetchone()
+            if not row:
+                return None
+            return self._handoff_checkpoint_row_to_dict(row)
+
+    def list_handoff_checkpoints(self, lane_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM handoff_checkpoints
+                WHERE lane_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (lane_id, max(1, int(limit))),
+            ).fetchall()
+        return [self._handoff_checkpoint_row_to_dict(row) for row in rows]
+
+    def get_latest_handoff_checkpoint(self, lane_id: str) -> Optional[Dict[str, Any]]:
+        checkpoints = self.list_handoff_checkpoints(lane_id=lane_id, limit=1)
+        return checkpoints[0] if checkpoints else None
+
+    def delete_handoff_checkpoints(self, checkpoint_ids: List[str]) -> int:
+        ids = [str(value) for value in (checkpoint_ids or []) if str(value).strip()]
+        if not ids:
+            return 0
+        placeholders = ", ".join("?" for _ in ids)
+        with self._get_connection() as conn:
+            conn.execute(
+                f"DELETE FROM handoff_checkpoint_memories WHERE checkpoint_id IN ({placeholders})",
+                ids,
+            )
+            conn.execute(
+                f"DELETE FROM handoff_checkpoint_scenes WHERE checkpoint_id IN ({placeholders})",
+                ids,
+            )
+            conn.execute(
+                f"DELETE FROM handoff_lane_conflicts WHERE checkpoint_id IN ({placeholders})",
+                ids,
+            )
+            cursor = conn.execute(
+                f"DELETE FROM handoff_checkpoints WHERE id IN ({placeholders})",
+                ids,
+            )
+            return cursor.rowcount
+
+    def prune_handoff_checkpoints(self, lane_id: str, max_checkpoints: int) -> int:
+        limit_value = max(0, int(max_checkpoints))
+        checkpoints = self.list_handoff_checkpoints(lane_id=lane_id, limit=100000)
+        stale_ids = [checkpoint["id"] for checkpoint in checkpoints[limit_value:]]
+        return self.delete_handoff_checkpoints(stale_ids)
+
+    def add_handoff_checkpoint_memory(
+        self,
+        checkpoint_id: str,
+        memory_id: str,
+        relevance_score: float = 1.0,
+    ) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO handoff_checkpoint_memories (checkpoint_id, memory_id, relevance_score)
+                VALUES (?, ?, ?)
+                """,
+                (checkpoint_id, memory_id, relevance_score),
+            )
+
+    def add_handoff_checkpoint_scene(
+        self,
+        checkpoint_id: str,
+        scene_id: str,
+        relevance_score: float = 1.0,
+    ) -> None:
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT OR IGNORE INTO handoff_checkpoint_scenes (checkpoint_id, scene_id, relevance_score)
+                VALUES (?, ?, ?)
+                """,
+                (checkpoint_id, scene_id, relevance_score),
+            )
+
+    def get_handoff_checkpoint_memories(self, checkpoint_id: str) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT m.*, hcm.relevance_score FROM memories m
+                JOIN handoff_checkpoint_memories hcm ON m.id = hcm.memory_id
+                WHERE hcm.checkpoint_id = ? AND m.tombstone = 0
+                ORDER BY hcm.relevance_score DESC
+                """,
+                (checkpoint_id,),
+            ).fetchall()
+        return [self._row_to_dict(row) for row in rows]
+
+    def get_handoff_checkpoint_scenes(self, checkpoint_id: str) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT s.*, hcs.relevance_score FROM scenes s
+                JOIN handoff_checkpoint_scenes hcs ON s.id = hcs.scene_id
+                WHERE hcs.checkpoint_id = ? AND s.tombstone = 0
+                ORDER BY hcs.relevance_score DESC
+                """,
+                (checkpoint_id,),
+            ).fetchall()
+        return [self._scene_row_to_dict(row) for row in rows]
+
+    def add_handoff_lane_conflict(self, data: Dict[str, Any]) -> str:
+        conflict_id = data.get("id", str(uuid.uuid4()))
+        now = datetime.utcnow().isoformat()
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO handoff_lane_conflicts (
+                    id, lane_id, checkpoint_id, user_id,
+                    conflict_fields, previous_state, incoming_state, resolved_state, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    conflict_id,
+                    data.get("lane_id"),
+                    data.get("checkpoint_id"),
+                    data.get("user_id", "default"),
+                    json.dumps(data.get("conflict_fields", [])),
+                    json.dumps(data.get("previous_state", {})),
+                    json.dumps(data.get("incoming_state", {})),
+                    json.dumps(data.get("resolved_state", {})),
+                    data.get("created_at", now),
+                ),
+            )
+        return conflict_id
+
+    def list_handoff_lane_conflicts(self, lane_id: str, limit: int = 50) -> List[Dict[str, Any]]:
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM handoff_lane_conflicts
+                WHERE lane_id = ?
+                ORDER BY created_at DESC
+                LIMIT ?
+                """,
+                (lane_id, max(1, int(limit))),
+            ).fetchall()
+        return [self._handoff_conflict_row_to_dict(row) for row in rows]
+
+    def _handoff_row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        data = dict(row)
+        for key in {
+            "decisions_made",
+            "files_touched",
+            "todos_remaining",
+            "blockers",
+            "key_commands",
+            "test_results",
+            "linked_memory_ids",
+            "linked_scene_ids",
+        }:
+            data[key] = self._parse_json_value(data.get(key), [])
+        data["repo_id"] = data.get("repo_id") or data.get("repo")
+        data["namespace"] = data.get("namespace") or "default"
+        data["confidentiality_scope"] = data.get("confidentiality_scope") or "work"
+        data["last_checkpoint_at"] = data.get("last_checkpoint_at") or data.get("updated_at") or data.get("created_at")
+        return data
+
+    def _handoff_lane_row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        data = dict(row)
+        data["current_state"] = self._parse_json_value(data.get("current_state"), {})
+        data["namespace"] = data.get("namespace") or "default"
+        data["confidentiality_scope"] = data.get("confidentiality_scope") or "work"
+        data["version"] = int(data.get("version", 0) or 0)
+        return data
+
+    def _handoff_checkpoint_row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        data = dict(row)
+        for key in {
+            "decisions_made",
+            "files_touched",
+            "todos_remaining",
+            "blockers",
+            "key_commands",
+            "test_results",
+            "merge_conflicts",
+        }:
+            data[key] = self._parse_json_value(data.get(key), [])
+        return data
+
+    def _handoff_conflict_row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+        data = dict(row)
+        data["conflict_fields"] = self._parse_json_value(data.get("conflict_fields"), [])
+        data["previous_state"] = self._parse_json_value(data.get("previous_state"), {})
+        data["incoming_state"] = self._parse_json_value(data.get("incoming_state"), {})
+        data["resolved_state"] = self._parse_json_value(data.get("resolved_state"), {})
+        return data
 
     # =========================================================================
     # Utilities

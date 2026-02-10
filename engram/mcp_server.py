@@ -166,7 +166,7 @@ server = Server("engram-memory")
 @server.list_tools()
 async def list_tools() -> List[Tool]:
     """List available engram tools."""
-    return [
+    tools = [
         Tool(
             name="add_memory",
             description="Create a write proposal in staging by default. Supports direct writes only when mode='direct' in trusted local contexts. For simple saves without extras, prefer `remember`.",
@@ -704,7 +704,184 @@ async def list_tools() -> List[Tool]:
                 "required": ["query"]
             }
         ),
+        # ---- Cross-Agent Handoff tools ----
+        Tool(
+            name="save_session_digest",
+            description="Save a session digest before ending or when interrupted. Enables cross-agent handoff so another agent can continue where you left off.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_summary": {
+                        "type": "string",
+                        "description": "What was the agent doing — the main task being worked on"
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": "User identifier (default: 'default')"
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Identifier of the agent saving the digest (default: 'claude-code')"
+                    },
+                    "requester_agent_id": {
+                        "type": "string",
+                        "description": "Agent identity performing this write (defaults to agent_id)."
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": "Repository or project path for scoping"
+                    },
+                    "branch": {
+                        "type": "string",
+                        "description": "Optional branch name for lane routing"
+                    },
+                    "lane_id": {
+                        "type": "string",
+                        "description": "Optional lane identifier for checkpointing"
+                    },
+                    "lane_type": {
+                        "type": "string",
+                        "description": "Lane category (default: general)"
+                    },
+                    "agent_role": {
+                        "type": "string",
+                        "description": "Role of source agent (pm/design/frontend/backend/etc.)"
+                    },
+                    "namespace": {
+                        "type": "string",
+                        "description": "Namespace scope for handoff (default: default)"
+                    },
+                    "confidentiality_scope": {
+                        "type": "string",
+                        "description": "Confidentiality scope for handoff (default: work)"
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["active", "paused", "completed", "abandoned"],
+                        "description": "Session status (default: 'paused')"
+                    },
+                    "decisions_made": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Key decisions made during the session"
+                    },
+                    "files_touched": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "File paths modified during the session"
+                    },
+                    "todos_remaining": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Remaining work items for the next agent"
+                    },
+                    "blockers": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Known blockers for the receiving agent"
+                    },
+                    "key_commands": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Important commands run during the session"
+                    },
+                    "test_results": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Recent test outcomes"
+                    },
+                    "context_snapshot": {
+                        "type": "string",
+                        "description": "Free-form context blob for the receiving agent"
+                    },
+                    "started_at": {
+                        "type": "string",
+                        "description": "ISO timestamp when the session started"
+                    },
+                    "ended_at": {
+                        "type": "string",
+                        "description": "ISO timestamp when the session ended"
+                    },
+                },
+                "required": ["task_summary"]
+            }
+        ),
+        Tool(
+            name="get_last_session",
+            description="Get the most recent session digest to continue where the last agent left off. Returns full handoff context including linked memories.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "string",
+                        "description": "User identifier (default: 'default')"
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Filter by source agent identifier"
+                    },
+                    "requester_agent_id": {
+                        "type": "string",
+                        "description": "Agent identity performing this read."
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": "Filter by repository/project path"
+                    },
+                    "statuses": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional status list filter (defaults to active/paused)"
+                    },
+                }
+            }
+        ),
+        Tool(
+            name="list_sessions",
+            description="Browse session handoff history. Returns a summary list of past sessions.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {
+                        "type": "string",
+                        "description": "User identifier (default: 'default')"
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Filter by agent identifier"
+                    },
+                    "requester_agent_id": {
+                        "type": "string",
+                        "description": "Agent identity performing this read."
+                    },
+                    "repo": {
+                        "type": "string",
+                        "description": "Filter by repository/project path"
+                    },
+                    "status": {
+                        "type": "string",
+                        "enum": ["active", "paused", "completed", "abandoned"],
+                        "description": "Filter by session status"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum number of sessions to return (default: 20)"
+                    },
+                    "statuses": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional status list filter."
+                    },
+                }
+            }
+        ),
     ]
+
+    # Some MCP clients cap/trim tool manifests per chat.
+    # Keep handoff tools at the front so cross-agent continuity remains available.
+    priority = {"save_session_digest": 0, "get_last_session": 1, "list_sessions": 2}
+    tools.sort(key=lambda tool: priority.get(tool.name, 1000))
+    return tools
 
 
 @server.call_tool()
@@ -730,6 +907,79 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                 ttl_minutes=24 * 60,
             )
             return session["token"]
+
+        def _preview(value: Any, limit: int = 1200) -> str:
+            try:
+                text = json.dumps(value, default=str)
+            except Exception:
+                text = str(value)
+            if len(text) > limit:
+                return text[:limit] + "...(truncated)"
+            return text
+
+        auto_handoff_enabled = bool(
+            getattr(memory, "handoff_processor", None)
+            and getattr(memory, "handoff_config", None)
+            and getattr(memory.handoff_config, "auto_session_bus", False)
+        )
+        auto_handoff_skip_tools = {"save_session_digest", "get_last_session", "list_sessions"}
+        auto_handoff_context: Dict[str, Any] = {}
+        auto_handoff_token: Optional[str] = None
+        auto_resume_packet: Optional[Dict[str, Any]] = None
+
+        if auto_handoff_enabled and name not in auto_handoff_skip_tools:
+            caller_agent_id = (
+                arguments.get("requester_agent_id")
+                or arguments.get("agent_id")
+                or os.environ.get("ENGRAM_MCP_AGENT_ID")
+                or "claude-code"
+            )
+            user_id = arguments.get("user_id", "default")
+            namespace = arguments.get("namespace", "default")
+            repo_path = arguments.get("repo") or arguments.get("repo_path") or os.getcwd()
+            objective = (
+                arguments.get("task_summary")
+                or arguments.get("objective")
+                or arguments.get("query")
+                or f"{name} task"
+            )
+            auto_handoff_context = {
+                "user_id": user_id,
+                "agent_id": caller_agent_id,
+                "namespace": namespace,
+                "repo_path": repo_path,
+                "branch": arguments.get("branch"),
+                "lane_id": arguments.get("lane_id"),
+                "lane_type": arguments.get("lane_type", "general"),
+                "objective": objective,
+                "agent_role": arguments.get("agent_role"),
+                "confidentiality_scope": arguments.get("confidentiality_scope", "work"),
+            }
+            try:
+                auto_handoff_token = _session_token(
+                    user_id=user_id,
+                    agent_id=caller_agent_id,
+                    capabilities=["read_handoff", "write_handoff"],
+                    namespaces=[namespace],
+                )
+            except Exception:
+                auto_handoff_token = None
+            try:
+                auto_resume_packet = memory.auto_resume_context(
+                    user_id=user_id,
+                    agent_id=caller_agent_id,
+                    repo_path=repo_path,
+                    branch=arguments.get("branch"),
+                    lane_type=arguments.get("lane_type", "general"),
+                    objective=objective,
+                    agent_role=arguments.get("agent_role"),
+                    namespace=namespace,
+                    token=auto_handoff_token,
+                    requester_agent_id=caller_agent_id,
+                    auto_create=True,
+                )
+            except Exception:
+                auto_resume_packet = None
 
         if name in {"add_memory", "propose_write"}:
             content = arguments.get("content", "")
@@ -1206,8 +1456,176 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                 "total": len(profiles),
             }
 
+        # ---- Handoff tools ----
+        elif name == "save_session_digest":
+            user_id = arguments.get("user_id", "default")
+            agent_id = arguments.get("agent_id", "claude-code")
+            requester_agent_id = arguments.get("requester_agent_id", agent_id)
+            namespace = arguments.get("namespace", "default")
+            token = _session_token(
+                user_id=user_id,
+                agent_id=requester_agent_id,
+                capabilities=["write_handoff"],
+                namespaces=[namespace],
+            )
+            task_summary = str(arguments.get("task_summary", "")).strip()
+            if not task_summary:
+                result = {"error": "task_summary is required"}
+            else:
+                digest = {
+                    "task_summary": task_summary,
+                    "repo": arguments.get("repo"),
+                    "branch": arguments.get("branch"),
+                    "lane_id": arguments.get("lane_id"),
+                    "lane_type": arguments.get("lane_type"),
+                    "agent_role": arguments.get("agent_role"),
+                    "namespace": namespace,
+                    "confidentiality_scope": arguments.get("confidentiality_scope", "work"),
+                    "status": arguments.get("status", "paused"),
+                    "decisions_made": arguments.get("decisions_made", []),
+                    "files_touched": arguments.get("files_touched", []),
+                    "todos_remaining": arguments.get("todos_remaining", []),
+                    "blockers": arguments.get("blockers", []),
+                    "key_commands": arguments.get("key_commands", []),
+                    "test_results": arguments.get("test_results", []),
+                    "context_snapshot": arguments.get("context_snapshot"),
+                    "started_at": arguments.get("started_at"),
+                    "ended_at": arguments.get("ended_at"),
+                }
+                result = memory.save_session_digest(
+                    user_id,
+                    agent_id,
+                    digest,
+                    token=token,
+                    requester_agent_id=requester_agent_id,
+                )
+
+        elif name == "get_last_session":
+            user_id = arguments.get("user_id", "default")
+            agent_id = arguments.get("agent_id")
+            requester_agent_id = arguments.get(
+                "requester_agent_id",
+                arguments.get("agent_id", "claude-code"),
+            )
+            namespace = arguments.get("namespace", "default")
+            token = _session_token(
+                user_id=user_id,
+                agent_id=requester_agent_id,
+                capabilities=["read_handoff"],
+                namespaces=[namespace],
+            )
+            repo = arguments.get("repo")
+            session = memory.get_last_session(
+                user_id,
+                agent_id=agent_id,
+                repo=repo,
+                statuses=arguments.get("statuses"),
+                token=token,
+                requester_agent_id=requester_agent_id,
+            )
+            if session:
+                result = session
+            else:
+                result = {"error": "No sessions found"}
+
+        elif name == "list_sessions":
+            user_id = arguments.get("user_id", "default")
+            requester_agent_id = arguments.get(
+                "requester_agent_id",
+                arguments.get("agent_id", "claude-code"),
+            )
+            namespace = arguments.get("namespace", "default")
+            token = _session_token(
+                user_id=user_id,
+                agent_id=requester_agent_id,
+                capabilities=["read_handoff"],
+                namespaces=[namespace],
+            )
+            sessions = memory.list_sessions(
+                user_id=user_id,
+                agent_id=arguments.get("agent_id"),
+                repo=arguments.get("repo"),
+                status=arguments.get("status"),
+                statuses=arguments.get("statuses"),
+                limit=arguments.get("limit", 20),
+                token=token,
+                requester_agent_id=requester_agent_id,
+            )
+            result = {
+                "sessions": [
+                    {
+                        "id": s["id"],
+                        "agent_id": s.get("agent_id"),
+                        "repo": s.get("repo"),
+                        "repo_id": s.get("repo_id"),
+                        "lane_id": s.get("lane_id"),
+                        "status": s.get("status"),
+                        "task_summary": s.get("task_summary", "")[:200],
+                        "last_checkpoint_at": s.get("last_checkpoint_at"),
+                        "updated_at": s.get("updated_at"),
+                    }
+                    for s in sessions
+                ],
+                "total": len(sessions),
+            }
+
         else:
             result = {"error": f"Unknown tool: {name}"}
+
+        if (
+            auto_handoff_enabled
+            and name not in auto_handoff_skip_tools
+            and auto_handoff_context
+            and "tool_complete" in getattr(memory.handoff_config, "auto_checkpoint_events", [])
+        ):
+            checkpoint_payload = {
+                "status": "active",
+                "task_summary": (
+                    arguments.get("task_summary")
+                    or arguments.get("objective")
+                    or arguments.get("query")
+                    or f"{name} completed"
+                ),
+                "decisions_made": arguments.get("decisions_made", []),
+                "files_touched": arguments.get("files_touched", []),
+                "todos_remaining": arguments.get("todos_remaining", []),
+                "blockers": arguments.get("blockers", []),
+                "key_commands": arguments.get("key_commands", []),
+                "test_results": arguments.get("test_results", []),
+                "context_snapshot": _preview(
+                    {
+                        "tool": name,
+                        "arguments": arguments,
+                        "result": result,
+                    },
+                    limit=2000,
+                ),
+            }
+            try:
+                checkpoint_result = memory.auto_checkpoint(
+                    user_id=auto_handoff_context["user_id"],
+                    agent_id=auto_handoff_context["agent_id"],
+                    payload=checkpoint_payload,
+                    event_type="tool_complete",
+                    repo_path=auto_handoff_context["repo_path"],
+                    branch=auto_handoff_context["branch"],
+                    lane_id=auto_handoff_context["lane_id"],
+                    lane_type=auto_handoff_context["lane_type"],
+                    objective=auto_handoff_context["objective"],
+                    agent_role=auto_handoff_context["agent_role"],
+                    namespace=auto_handoff_context["namespace"],
+                    confidentiality_scope=auto_handoff_context["confidentiality_scope"],
+                    token=auto_handoff_token,
+                    requester_agent_id=auto_handoff_context["agent_id"],
+                )
+            except Exception as checkpoint_exc:
+                checkpoint_result = {"error": str(checkpoint_exc)}
+
+            if isinstance(result, dict):
+                handoff_meta: Dict[str, Any] = {"checkpoint": checkpoint_result}
+                if auto_resume_packet:
+                    handoff_meta["resume"] = auto_resume_packet
+                result["_handoff"] = handoff_meta
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
