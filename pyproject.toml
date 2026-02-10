@@ -3,7 +3,7 @@ requires = ["setuptools>=61.0", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [project]
-name = "engram"
+name = "engram-memory"
 version = "0.4.0"
 description = "Memory layer for AI agents — biologically-inspired forgetting, multi-agent trust, and plug-and-play integrations"
 readme = "README.md"

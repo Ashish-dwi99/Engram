@@ -33,10 +33,6 @@
 
 ---
 
-> **100% free, forever.** No Pro tier, no usage limits, no license keys. Bring your own API key (Gemini, OpenAI, or Ollama). Everything runs locally by default.
-
----
-
 ## Why Engram
 
 Every AI agent you use starts with amnesia. Your coding assistant forgets your preferences between sessions. Your planning agent has no idea what your research agent discovered yesterday. You end up re-explaining context that should already be known.
