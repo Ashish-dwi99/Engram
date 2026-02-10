@@ -16,7 +16,7 @@
 </p>
 
 <p align="center">
-  <a href="https://pypi.org/project/engram"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+"></a>
+  <a href="https://pypi.org/project/engram-memory"><img src="https://img.shields.io/badge/python-3.9%2B-blue.svg" alt="Python 3.9+"></a>
   <a href="https://github.com/Ashish-dwi99/Engram/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-blue.svg" alt="MIT License"></a>
   <a href="https://github.com/Ashish-dwi99/Engram/actions"><img src="https://github.com/Ashish-dwi99/Engram/actions/workflows/test.yml/badge.svg" alt="Tests"></a>
   <a href="https://github.com/Ashish-dwi99/Engram"><img src="https://img.shields.io/github/stars/Ashish-dwi99/Engram?style=social" alt="GitHub Stars"></a>
@@ -28,6 +28,7 @@
   <a href="#%EF%B8%8F-architecture">Architecture</a> &middot;
   <a href="#-integrations">Integrations</a> &middot;
   <a href="#-api--sdk">API & SDK</a> &middot;
+  <a href="#-longmemeval-on-colab-gpu">LongMemEval</a> &middot;
   <a href="https://github.com/Ashish-dwi99/Engram/blob/main/CHANGELOG.md">Changelog</a>
 </p>
 
@@ -60,12 +61,59 @@ But unlike "store everything forever" approaches, Engram treats agents as **untr
 ## Quick Start
 
 ```bash
-pip install -e ".[all]"            # 1. Install
-export GEMINI_API_KEY="your-key"   # 2. Set one API key (or OPENAI_API_KEY, or OLLAMA_HOST)
+pip install engram-memory          # 1. Install from PyPI
+export GEMINI_API_KEY="your-key"   # 2. Set one key before starting Engram
 engram install                     # 3. Auto-configure Claude Code, Cursor, Codex
 ```
 
 Restart your agent. Done — it now has persistent memory across sessions.
+
+### PyPI Install Options
+
+```bash
+# Default runtime (Gemini + local Qdrant + MemoryClient deps)
+pip install engram-memory
+
+# Full stack extras (MCP server + REST API + async + all providers)
+pip install "engram-memory[all]"
+
+# OpenAI provider add-on
+pip install "engram-memory[openai]"
+
+# Ollama provider add-on
+pip install "engram-memory[ollama]"
+```
+
+### API Key: When and How to Provide It
+
+Engram reads provider credentials when a process initializes `Memory()` (for example: `engram`, `engram-api`, `engram-mcp`, or your Python app).
+
+1. Set env vars **before** starting those processes.
+2. If you change keys, restart the process.
+3. Default provider is Gemini, so set `GEMINI_API_KEY` or `GOOGLE_API_KEY` unless you override provider config.
+
+```bash
+# Default (Gemini)
+export GEMINI_API_KEY="your-key"
+engram-api
+```
+
+```bash
+# OpenAI provider
+export OPENAI_API_KEY="your-key"
+engram-api
+```
+
+```bash
+# Ollama (local; no cloud key)
+export OLLAMA_HOST="http://localhost:11434"
+engram-api
+```
+
+For remote usage via `MemoryClient`, provider API keys are needed on the **server** running Engram.  
+The client only needs:
+- `ENGRAM_ADMIN_KEY` (or `admin_key=...`) when minting sessions via `/v1/sessions`
+- Bearer session token for normal read/write API calls
 
 **Or with Docker:**
 
@@ -562,6 +610,70 @@ Engram is based on:
 | Retrieval Precision | +8% on LTI-Bench |
 
 Biological inspirations: Ebbinghaus Forgetting Curve → exponential decay, Spaced Repetition → access boosts strength, Sleep Consolidation → SML → LML promotion, Production Effect → echo encoding, Elaborative Encoding → deeper processing = stronger memory.
+
+---
+
+## LongMemEval on Colab (GPU)
+
+Use this flow to benchmark Engram on LongMemEval in Google Colab with GPU acceleration.
+
+```bash
+# 1) In Colab: Runtime -> Change runtime type -> GPU
+
+# 2) Install Engram + GPU reader dependencies
+pip install -U engram-memory transformers accelerate
+
+# 3) Download LongMemEval data
+mkdir -p /content/longmemeval
+cd /content/longmemeval
+curl -L -o longmemeval_s_cleaned.json \
+  https://huggingface.co/datasets/xiaowu0162/longmemeval-cleaned/resolve/main/longmemeval_s_cleaned.json
+
+# 4) Run Engram benchmark (HF reader on GPU)
+python -m engram.benchmarks.longmemeval \
+  --dataset-path /content/longmemeval/longmemeval_s_cleaned.json \
+  --output-jsonl /content/longmemeval/engram_hypotheses.jsonl \
+  --retrieval-jsonl /content/longmemeval/engram_retrieval.jsonl \
+  --answer-backend hf \
+  --hf-model Qwen/Qwen2.5-1.5B-Instruct \
+  --embedder-provider simple \
+  --llm-provider mock \
+  --vector-store-provider memory \
+  --history-db-path /content/engram-longmemeval.db \
+  --top-k 8 \
+  --max-questions 100 \
+  --skip-abstention
+```
+
+Notes:
+- The output file is evaluator-compatible (`question_id`, `hypothesis` per line).
+- `--include-debug-fields` adds retrieval diagnostics into each output row.
+- The command above uses `simple` embedder + `mock` LLM for memory operations, so **no Gemini/OpenAI key is required**.
+
+If you want to run with Gemini only (no extra reader packages), use base install and set key **before** starting the run:
+
+```bash
+pip install -U engram-memory
+export GEMINI_API_KEY="your-key"
+
+python -m engram.benchmarks.longmemeval \
+  --dataset-path /content/longmemeval/longmemeval_s_cleaned.json \
+  --output-jsonl /content/longmemeval/engram_hypotheses.jsonl \
+  --answer-backend engram-llm \
+  --llm-provider gemini \
+  --embedder-provider gemini \
+  --vector-store-provider memory
+```
+
+Optional official QA scoring from the LongMemEval repo:
+
+```bash
+cd /content
+git clone https://github.com/xiaowu0162/LongMemEval.git
+cd /content/LongMemEval/src/evaluation
+export OPENAI_API_KEY="your-key"
+python evaluate_qa.py gpt-4o /content/longmemeval/engram_hypotheses.jsonl /content/longmemeval/longmemeval_s_cleaned.json
+```
 
 ---
 
