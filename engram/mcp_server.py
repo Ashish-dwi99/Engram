@@ -1031,6 +1031,122 @@ async def list_tools() -> List[Tool]:
                 }
             }
         ),
+        # ---- Active Memory (signal bus) tools ----
+        Tool(
+            name="signal_write",
+            description="Post a signal to the active memory bus. State signals upsert by key+agent; events always create new; directives are permanent.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "Signal key (e.g., 'editing_file', 'build_status', 'use_typescript')"
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "Signal value/content"
+                    },
+                    "signal_type": {
+                        "type": "string",
+                        "enum": ["state", "event", "directive"],
+                        "description": "Signal type: state (current status, upserts), event (one-shot), directive (permanent rule). Default: state"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["global", "repo", "namespace"],
+                        "description": "Visibility scope. Default: global"
+                    },
+                    "scope_key": {
+                        "type": "string",
+                        "description": "Scope qualifier (e.g., repo path for scope=repo)"
+                    },
+                    "ttl_tier": {
+                        "type": "string",
+                        "enum": ["noise", "notable", "critical", "directive"],
+                        "description": "TTL tier: noise (30m), notable (2h), critical (24h), directive (permanent). Default: notable"
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Source agent identifier"
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": "User identifier (default: 'default')"
+                    },
+                },
+                "required": ["key", "value"],
+            }
+        ),
+        Tool(
+            name="signal_read",
+            description="Read active signals from the memory bus. Returns signals ordered by priority (directive > critical > notable > noise).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "scope": {
+                        "type": "string",
+                        "enum": ["global", "repo", "namespace"],
+                        "description": "Filter by visibility scope"
+                    },
+                    "scope_key": {
+                        "type": "string",
+                        "description": "Filter by scope qualifier"
+                    },
+                    "signal_type": {
+                        "type": "string",
+                        "enum": ["state", "event", "directive"],
+                        "description": "Filter by signal type"
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Reader agent identifier (tracked for read_by)"
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": "User identifier (default: 'default')"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum signals to return"
+                    },
+                },
+            }
+        ),
+        Tool(
+            name="signal_clear",
+            description="Clear signals from the active memory bus matching the given criteria.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "Clear signals with this key"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["global", "repo", "namespace"],
+                        "description": "Clear signals with this scope"
+                    },
+                    "scope_key": {
+                        "type": "string",
+                        "description": "Clear signals with this scope key"
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Clear signals from this agent"
+                    },
+                    "signal_type": {
+                        "type": "string",
+                        "enum": ["state", "event", "directive"],
+                        "description": "Clear signals of this type"
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": "User identifier (default: 'default')"
+                    },
+                },
+            }
+        ),
     ]
 
     # Some MCP clients cap/trim tool manifests per chat.
@@ -1504,6 +1620,68 @@ def _handle_search_scenes(memory: "Memory", arguments: Dict[str, Any], _session_
     }
 
 
+# ---- Active Memory (signal bus) helpers and handlers ----
+
+_active_store = None
+
+
+def _get_active_store(memory: Memory):
+    """Lazy-initialize the global active memory store."""
+    global _active_store
+    if _active_store is None:
+        if memory.config.active.enabled:
+            from engram.core.active_memory import ActiveMemoryStore
+            _active_store = ActiveMemoryStore(memory.config.active)
+    return _active_store
+
+
+@_tool_handler("signal_write")
+def _handle_signal_write(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    active = _get_active_store(memory)
+    if not active:
+        return {"error": "Active memory is disabled"}
+    return active.write_signal(
+        key=arguments["key"],
+        value=arguments["value"],
+        signal_type=arguments.get("signal_type", "state"),
+        scope=arguments.get("scope", "global"),
+        scope_key=arguments.get("scope_key"),
+        ttl_tier=arguments.get("ttl_tier", "notable"),
+        source_agent_id=arguments.get("agent_id"),
+        user_id=arguments.get("user_id", "default"),
+    )
+
+
+@_tool_handler("signal_read")
+def _handle_signal_read(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    active = _get_active_store(memory)
+    if not active:
+        return {"error": "Active memory is disabled"}
+    return active.read_signals(
+        scope=arguments.get("scope"),
+        scope_key=arguments.get("scope_key"),
+        signal_type=arguments.get("signal_type"),
+        user_id=arguments.get("user_id", "default"),
+        reader_agent_id=arguments.get("agent_id"),
+        limit=arguments.get("limit"),
+    )
+
+
+@_tool_handler("signal_clear")
+def _handle_signal_clear(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    active = _get_active_store(memory)
+    if not active:
+        return {"error": "Active memory is disabled"}
+    return active.clear_signals(
+        key=arguments.get("key"),
+        scope=arguments.get("scope"),
+        scope_key=arguments.get("scope_key"),
+        source_agent_id=arguments.get("agent_id"),
+        signal_type=arguments.get("signal_type"),
+        user_id=arguments.get("user_id", "default"),
+    )
+
+
 @server.call_tool()
 async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
     """Handle tool calls."""
@@ -1814,6 +1992,21 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
             if auto_resume_packet:
                 handoff_meta["resume"] = auto_resume_packet
             result["_handoff"] = handoff_meta
+
+        # Active memory auto-injection: attach latest signals to every response
+        if isinstance(result, dict):
+            active_store = _get_active_store(memory)
+            if active_store:
+                try:
+                    signals = active_store.read_signals(
+                        user_id=arguments.get("user_id", "default"),
+                        reader_agent_id=arguments.get("agent_id"),
+                        limit=memory.config.active.max_signals_per_response,
+                    )
+                    if signals:
+                        result["_active"] = signals
+                except Exception:
+                    pass  # Never break tool responses for active memory errors
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 

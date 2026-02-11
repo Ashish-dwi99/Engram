@@ -200,6 +200,25 @@ class Memory(MemoryBase):
         # v2 Personal Memory Kernel orchestration layer.
         self.kernel = PersonalMemoryKernel(self)
 
+        # Active memory store (lazy initialized)
+        self._active_store = None
+
+    @property
+    def active(self):
+        """Lazy-initialized Active Memory store for signal bus."""
+        if self._active_store is None and self.config.active.enabled:
+            from engram.core.active_memory import ActiveMemoryStore
+            self._active_store = ActiveMemoryStore(self.config.active)
+        return self._active_store
+
+    def consolidate_active(self) -> Dict[str, Any]:
+        """Run one consolidation cycle: promote important active signals to passive memory."""
+        if not self.active:
+            return {"skipped": True, "reason": "active memory disabled"}
+        from engram.core.consolidation import ConsolidationEngine
+        engine = ConsolidationEngine(self.active, self, self.config.active)
+        return engine.run_cycle()
+
     def __repr__(self) -> str:
         return f"Memory(db={self.db!r}, echo={self.echo_config.enable_echo}, scenes={self.scene_config.enable_scenes})"
 

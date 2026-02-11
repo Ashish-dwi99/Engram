@@ -3,6 +3,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from engram.configs.active import ActiveMemoryConfig
+
 
 class VectorStoreConfig(BaseModel):
     provider: str = Field(default="qdrant")
@@ -190,3 +192,4 @@ class MemoryConfig(BaseModel):
     scene: SceneConfig = Field(default_factory=SceneConfig)
     profile: ProfileConfig = Field(default_factory=ProfileConfig)
     handoff: HandoffConfig = Field(default_factory=HandoffConfig)
+    active: ActiveMemoryConfig = Field(default_factory=ActiveMemoryConfig)
