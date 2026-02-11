@@ -4,16 +4,26 @@ engram MCP Server for Claude Code integration.
 This server exposes engram's memory capabilities as MCP tools that Claude Code can use.
 """
 
+import atexit
 import json
+import logging
 import os
+import signal
 import sys
-from typing import Any, Dict, List, Optional
+import threading
+import time
+from typing import Any, Callable, Dict, List, Optional
 
 from mcp.server import Server
 from mcp.server.stdio import stdio_server
 from mcp.types import Tool, TextContent
 
 from engram.memory.main import Memory
+from engram.core.handoff_backend import (
+    HandoffBackendError,
+    classify_handoff_error,
+    create_handoff_backend,
+)
 from engram.configs.base import (
     MemoryConfig,
     VectorStoreConfig,
@@ -21,6 +31,8 @@ from engram.configs.base import (
     EmbedderConfig,
     FadeMemConfig,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def _get_embedding_dims_for_model(model: str, provider: str) -> int:
@@ -149,6 +161,11 @@ def get_memory_instance() -> Memory:
 
 # Global memory instance (lazy initialized)
 _memory: Optional[Memory] = None
+_handoff_backend = None
+_lifecycle_lock = threading.Lock()
+_lifecycle_state: Dict[str, Dict[str, Any]] = {}
+_idle_pause_seconds = max(1, int(os.environ.get("ENGRAM_MCP_IDLE_PAUSE_SECONDS", "300")))
+_shutdown_hooks_registered = False
 
 
 def get_memory() -> Memory:
@@ -159,13 +176,146 @@ def get_memory() -> Memory:
     return _memory
 
 
+def _strict_handoff_enabled(memory: Memory) -> bool:
+    cfg = getattr(memory, "handoff_config", None)
+    return bool(getattr(cfg, "strict_handoff_auth", True))
+
+
+def get_handoff_backend(memory: Memory):
+    """Get or create the configured handoff backend."""
+    global _handoff_backend
+    if _handoff_backend is None:
+        _handoff_backend = create_handoff_backend(memory)
+    return _handoff_backend
+
+
+def _handoff_key(*, user_id: str, agent_id: str, namespace: str, repo_id: Optional[str], repo_path: Optional[str]) -> str:
+    scoped_repo = str(repo_id or repo_path or "").strip() or "unknown-repo"
+    return f"{user_id}::{agent_id}::{namespace}::{scoped_repo}"
+
+
+def _merge_handoff_context(existing: Dict[str, Any], update: Dict[str, Any]) -> Dict[str, Any]:
+    merged = dict(existing)
+    for key, value in update.items():
+        if value is not None:
+            merged[key] = value
+    return merged
+
+
+def _record_handoff_context(context: Dict[str, Any]) -> None:
+    user_id = context.get("user_id", "default")
+    agent_id = context.get("agent_id", "claude-code")
+    namespace = context.get("namespace", "default")
+    repo_path = context.get("repo_path")
+    key = _handoff_key(
+        user_id=user_id,
+        agent_id=agent_id,
+        namespace=namespace,
+        repo_id=context.get("repo_id"),
+        repo_path=repo_path,
+    )
+    alt_key = _handoff_key(
+        user_id=user_id,
+        agent_id=agent_id,
+        namespace=namespace,
+        repo_id=None,
+        repo_path=repo_path,
+    )
+    with _lifecycle_lock:
+        now_ts = time.time()
+        existing = _lifecycle_state.get(key, {})
+        if not existing and alt_key in _lifecycle_state:
+            existing = _lifecycle_state.pop(alt_key)
+        merged = _merge_handoff_context(existing, context)
+        merged["last_activity_ts"] = now_ts
+        _lifecycle_state[key] = merged
+
+
+def _emit_lifecycle_checkpoint(memory: Memory, context: Dict[str, Any], *, event_type: str, task_summary: Optional[str]) -> Dict[str, Any]:
+    backend = get_handoff_backend(memory)
+    payload = {
+        "status": "paused" if event_type in {"agent_pause", "agent_end"} else "active",
+        "task_summary": task_summary or context.get("objective") or f"{event_type} checkpoint",
+        "decisions_made": context.get("decisions_made", []),
+        "files_touched": context.get("files_touched", []),
+        "todos_remaining": context.get("todos_remaining", []),
+        "blockers": context.get("blockers", []),
+        "key_commands": context.get("key_commands", []),
+        "test_results": context.get("test_results", []),
+        "context_snapshot": context.get("context_snapshot"),
+    }
+    return backend.auto_checkpoint(
+        user_id=context["user_id"],
+        agent_id=context["agent_id"],
+        namespace=context.get("namespace", "default"),
+        repo_path=context.get("repo_path") or os.getcwd(),
+        branch=context.get("branch"),
+        lane_id=context.get("lane_id"),
+        lane_type=context.get("lane_type", "general"),
+        objective=context.get("objective") or payload["task_summary"],
+        agent_role=context.get("agent_role"),
+        confidentiality_scope=context.get("confidentiality_scope", "work"),
+        payload=payload,
+        event_type=event_type,
+    )
+
+
+def _flush_agent_end_checkpoints() -> None:
+    """Best-effort final checkpoints on process shutdown."""
+    try:
+        memory = get_memory()
+    except Exception:
+        return
+    with _lifecycle_lock:
+        contexts = list(_lifecycle_state.values())
+    for context in contexts:
+        try:
+            _emit_lifecycle_checkpoint(
+                memory,
+                context,
+                event_type="agent_end",
+                task_summary=context.get("task_summary") or "Agent shutdown",
+            )
+        except Exception as exc:  # pragma: no cover - best effort shutdown path
+            logger.warning("Agent end checkpoint failed: %s", exc)
+
+
+def _register_shutdown_hooks() -> None:
+    global _shutdown_hooks_registered
+    if _shutdown_hooks_registered:
+        return
+    atexit.register(_flush_agent_end_checkpoints)
+
+    def _signal_handler(signum, _frame):  # pragma: no cover - signal path
+        try:
+            _flush_agent_end_checkpoints()
+        finally:
+            raise SystemExit(0)
+
+    for sig_name in ("SIGTERM", "SIGINT"):
+        sig_value = getattr(signal, sig_name, None)
+        if sig_value is not None:
+            try:
+                signal.signal(sig_value, _signal_handler)
+            except Exception:
+                logger.debug("Skipping signal hook registration for %s", sig_name)
+
+    _shutdown_hooks_registered = True
+
+
 # Create the MCP server
 server = Server("engram-memory")
+
+# Cached tool list — schemas are static, no need to rebuild on every call.
+_tools_cache: Optional[List[Tool]] = None
 
 
 @server.list_tools()
 async def list_tools() -> List[Tool]:
     """List available engram tools."""
+    global _tools_cache
+    if _tools_cache is not None:
+        return list(_tools_cache)
     tools = [
         Tool(
             name="add_memory",
@@ -830,7 +980,10 @@ async def list_tools() -> List[Tool]:
                     },
                     "statuses": {
                         "type": "array",
-                        "items": {"type": "string"},
+                        "items": {
+                            "type": "string",
+                            "enum": ["active", "paused", "completed", "abandoned"],
+                        },
                         "description": "Optional status list filter (defaults to active/paused)"
                     },
                 }
@@ -869,10 +1022,129 @@ async def list_tools() -> List[Tool]:
                     },
                     "statuses": {
                         "type": "array",
-                        "items": {"type": "string"},
+                        "items": {
+                            "type": "string",
+                            "enum": ["active", "paused", "completed", "abandoned"],
+                        },
                         "description": "Optional status list filter."
                     },
                 }
+            }
+        ),
+        # ---- Active Memory (signal bus) tools ----
+        Tool(
+            name="signal_write",
+            description="Post a signal to the active memory bus. State signals upsert by key+agent; events always create new; directives are permanent.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "Signal key (e.g., 'editing_file', 'build_status', 'use_typescript')"
+                    },
+                    "value": {
+                        "type": "string",
+                        "description": "Signal value/content"
+                    },
+                    "signal_type": {
+                        "type": "string",
+                        "enum": ["state", "event", "directive"],
+                        "description": "Signal type: state (current status, upserts), event (one-shot), directive (permanent rule). Default: state"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["global", "repo", "namespace"],
+                        "description": "Visibility scope. Default: global"
+                    },
+                    "scope_key": {
+                        "type": "string",
+                        "description": "Scope qualifier (e.g., repo path for scope=repo)"
+                    },
+                    "ttl_tier": {
+                        "type": "string",
+                        "enum": ["noise", "notable", "critical", "directive"],
+                        "description": "TTL tier: noise (30m), notable (2h), critical (24h), directive (permanent). Default: notable"
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Source agent identifier"
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": "User identifier (default: 'default')"
+                    },
+                },
+                "required": ["key", "value"],
+            }
+        ),
+        Tool(
+            name="signal_read",
+            description="Read active signals from the memory bus. Returns signals ordered by priority (directive > critical > notable > noise).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "scope": {
+                        "type": "string",
+                        "enum": ["global", "repo", "namespace"],
+                        "description": "Filter by visibility scope"
+                    },
+                    "scope_key": {
+                        "type": "string",
+                        "description": "Filter by scope qualifier"
+                    },
+                    "signal_type": {
+                        "type": "string",
+                        "enum": ["state", "event", "directive"],
+                        "description": "Filter by signal type"
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Reader agent identifier (tracked for read_by)"
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": "User identifier (default: 'default')"
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Maximum signals to return"
+                    },
+                },
+            }
+        ),
+        Tool(
+            name="signal_clear",
+            description="Clear signals from the active memory bus matching the given criteria.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "key": {
+                        "type": "string",
+                        "description": "Clear signals with this key"
+                    },
+                    "scope": {
+                        "type": "string",
+                        "enum": ["global", "repo", "namespace"],
+                        "description": "Clear signals with this scope"
+                    },
+                    "scope_key": {
+                        "type": "string",
+                        "description": "Clear signals with this scope key"
+                    },
+                    "agent_id": {
+                        "type": "string",
+                        "description": "Clear signals from this agent"
+                    },
+                    "signal_type": {
+                        "type": "string",
+                        "enum": ["state", "event", "directive"],
+                        "description": "Clear signals of this type"
+                    },
+                    "user_id": {
+                        "type": "string",
+                        "description": "User identifier (default: 'default')"
+                    },
+                },
             }
         ),
     ]
@@ -881,7 +1153,533 @@ async def list_tools() -> List[Tool]:
     # Keep handoff tools at the front so cross-agent continuity remains available.
     priority = {"save_session_digest": 0, "get_last_session": 1, "list_sessions": 2}
     tools.sort(key=lambda tool: priority.get(tool.name, 1000))
-    return tools
+    _tools_cache = tools
+    return list(tools)
+
+
+# Phase 6: Tool handler registry for cleaner dispatch.
+_TOOL_HANDLERS: Dict[str, Callable] = {}
+
+
+def _preview(value: Any, limit: int = 1200) -> str:
+    """Truncate a JSON-serialized value for checkpoint snapshots."""
+    try:
+        text = json.dumps(value, default=str)
+    except Exception:
+        text = str(value)
+    if len(text) > limit:
+        return text[:limit] + "...(truncated)"
+    return text
+
+
+def _make_session_token(memory: "Memory", *, user_id: str, agent_id: Optional[str], capabilities: List[str], namespaces: Optional[List[str]] = None) -> str:
+    """Create a scoped session token."""
+    session = memory.create_session(
+        user_id=user_id,
+        agent_id=agent_id,
+        allowed_confidentiality_scopes=["work", "personal", "finance", "health", "private"],
+        capabilities=capabilities,
+        namespaces=namespaces,
+        ttl_minutes=24 * 60,
+    )
+    return session["token"]
+
+
+def _tool_handler(name: str):
+    """Decorator to register a tool handler function."""
+    def decorator(fn):
+        _TOOL_HANDLERS[name] = fn
+        return fn
+    return decorator
+
+
+@_tool_handler("get_memory")
+def _handle_get_memory(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    memory_id = arguments.get("memory_id", "")
+    result = memory.get(memory_id)
+    if result:
+        return {
+            "id": result["id"],
+            "memory": result["memory"],
+            "layer": result.get("layer", "sml"),
+            "strength": round(result.get("strength", 1.0), 3),
+            "categories": result.get("categories", []),
+            "created_at": result.get("created_at"),
+            "access_count": result.get("access_count", 0),
+        }
+    return {"error": "Memory not found"}
+
+
+@_tool_handler("update_memory")
+def _handle_update_memory(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    memory_id = arguments.get("memory_id", "")
+    content = arguments.get("content", "")
+    return memory.update(memory_id, content)
+
+
+@_tool_handler("delete_memory")
+def _handle_delete_memory(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    memory_id = arguments.get("memory_id", "")
+    return memory.delete(memory_id)
+
+
+@_tool_handler("get_memory_stats")
+def _handle_get_memory_stats(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    user_id = arguments.get("user_id")
+    agent_id = arguments.get("agent_id")
+    return memory.get_stats(user_id=user_id, agent_id=agent_id)
+
+
+@_tool_handler("apply_memory_decay")
+def _handle_apply_memory_decay(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    user_id = arguments.get("user_id")
+    agent_id = arguments.get("agent_id")
+    scope = {"user_id": user_id, "agent_id": agent_id} if user_id or agent_id else None
+    return memory.apply_decay(scope=scope)
+
+
+@_tool_handler("engram_context")
+def _handle_engram_context(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    user_id = arguments.get("user_id", "default")
+    limit = arguments.get("limit", 15)
+    all_result = memory.get_all(user_id=user_id, limit=limit * 3)
+    all_memories = all_result.get("results", [])
+    layer_order = {"lml": 0, "sml": 1}
+    all_memories.sort(key=lambda m: (
+        layer_order.get(m.get("layer", "sml"), 1),
+        -float(m.get("strength", 1.0))
+    ))
+    digest = [
+        {
+            "id": m["id"],
+            "memory": m.get("memory", ""),
+            "layer": m.get("layer", "sml"),
+            "strength": round(float(m.get("strength", 1.0)), 3),
+            "categories": m.get("categories", []),
+        }
+        for m in all_memories[:limit]
+    ]
+    return {"digest": digest, "total_in_store": len(all_memories), "returned": len(digest)}
+
+
+@_tool_handler("get_profile")
+def _handle_get_profile(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    profile_id = arguments.get("profile_id", "")
+    profile = memory.get_profile(profile_id)
+    if profile:
+        profile.pop("embedding", None)
+        return profile
+    return {"error": "Profile not found"}
+
+
+@_tool_handler("list_profiles")
+def _handle_list_profiles(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    user_id = arguments.get("user_id", "default")
+    profiles = memory.get_all_profiles(user_id=user_id)
+    return {
+        "profiles": [
+            {
+                "id": p["id"],
+                "name": p.get("name"),
+                "profile_type": p.get("profile_type"),
+                "narrative": p.get("narrative"),
+                "fact_count": len(p.get("facts", [])),
+                "preference_count": len(p.get("preferences", [])),
+            }
+            for p in profiles
+        ],
+        "total": len(profiles),
+    }
+
+
+@_tool_handler("search_profiles")
+def _handle_search_profiles(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    query = arguments.get("query", "")
+    user_id = arguments.get("user_id", "default")
+    limit = arguments.get("limit", 10)
+    profiles = memory.search_profiles(query=query, user_id=user_id, limit=limit)
+    return {
+        "profiles": [
+            {
+                "id": p["id"],
+                "name": p.get("name"),
+                "profile_type": p.get("profile_type"),
+                "narrative": p.get("narrative"),
+                "facts": p.get("facts", [])[:5],
+                "search_score": p.get("search_score"),
+            }
+            for p in profiles
+        ],
+        "total": len(profiles),
+    }
+
+
+@_tool_handler("add_memory")
+@_tool_handler("propose_write")
+def _handle_add_memory(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    content = arguments.get("content", "")
+    user_id = arguments.get("user_id", "default")
+    agent_id = arguments.get("agent_id")
+    namespace = arguments.get("namespace", "default")
+    token = _session_token(
+        user_id=user_id,
+        agent_id=agent_id,
+        capabilities=["propose_write"],
+        namespaces=[namespace],
+    )
+    return memory.propose_write(
+        content=content,
+        user_id=user_id,
+        agent_id=agent_id,
+        categories=arguments.get("categories"),
+        metadata=arguments.get("metadata"),
+        scope=arguments.get("scope", "work"),
+        namespace=namespace,
+        mode=arguments.get("mode", "staging"),
+        infer=False,
+        token=token,
+        source_app="mcp",
+        source_type="mcp",
+        source_event_id=arguments.get("source_event_id"),
+    )
+
+
+@_tool_handler("search_memory")
+def _handle_search_memory(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    query = arguments.get("query", "")
+    user_id = arguments.get("user_id", "default")
+    agent_id = arguments.get("agent_id")
+    limit = arguments.get("limit", 10)
+    categories = arguments.get("categories")
+    if agent_id:
+        token = _session_token(user_id=user_id, agent_id=agent_id, capabilities=["search"])
+        result = memory.search_with_context(
+            query=query, user_id=user_id, agent_id=agent_id, token=token, limit=limit, categories=categories,
+        )
+    else:
+        result = memory.search(
+            query=query, user_id=user_id, agent_id=agent_id, limit=limit, categories=categories,
+            agent_category=arguments.get("agent_category"),
+            connector_ids=arguments.get("connector_ids"),
+            scope_filter=arguments.get("scope_filter"),
+        )
+    if "results" in result:
+        result["results"] = [
+            {
+                "id": r.get("id"),
+                "memory": r.get("memory", r.get("details", "")),
+                "score": round(r.get("composite_score", r.get("score", 0)), 3),
+                "layer": r.get("layer", "sml"),
+                "categories": r.get("categories", []),
+                "scope": r.get("scope"),
+                "agent_category": r.get("agent_category"),
+                "connector_id": r.get("connector_id"),
+            }
+            for r in result["results"]
+        ]
+    return result
+
+
+@_tool_handler("get_all_memories")
+def _handle_get_all_memories(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    result = memory.get_all(
+        user_id=arguments.get("user_id", "default"),
+        agent_id=arguments.get("agent_id"),
+        limit=arguments.get("limit", 50),
+        layer=arguments.get("layer"),
+    )
+    if "results" in result:
+        result["results"] = [
+            {
+                "id": r["id"],
+                "memory": r["memory"],
+                "layer": r.get("layer", "sml"),
+                "strength": round(r.get("strength", 1.0), 3),
+                "categories": r.get("categories", []),
+            }
+            for r in result["results"]
+        ]
+    return result
+
+
+@_tool_handler("remember")
+def _handle_remember(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    namespace = arguments.get("namespace", "default")
+    token = _session_token(
+        user_id="default",
+        agent_id="claude-code",
+        capabilities=["propose_write"],
+        namespaces=[namespace],
+    )
+    return memory.propose_write(
+        content=arguments.get("content", ""),
+        user_id="default",
+        agent_id="claude-code",
+        categories=arguments.get("categories"),
+        scope=arguments.get("scope", "work"),
+        namespace=namespace,
+        mode=arguments.get("mode", "staging"),
+        source_app="claude-code",
+        source_type="mcp",
+        infer=False,
+        token=token,
+    )
+
+
+@_tool_handler("list_pending_commits")
+def _handle_list_pending_commits(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    user_id = arguments.get("user_id", "default")
+    agent_id = arguments.get("agent_id", "claude-code")
+    token = _session_token(user_id=user_id, agent_id=agent_id, capabilities=["review_commits"])
+    return memory.list_pending_commits(
+        user_id=user_id, agent_id=agent_id, token=token,
+        status=arguments.get("status"), limit=arguments.get("limit", 100),
+    )
+
+
+@_tool_handler("resolve_conflict")
+def _handle_resolve_conflict(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    agent_id = arguments.get("agent_id", "claude-code")
+    token = _session_token(
+        user_id=arguments.get("user_id", "default"),
+        agent_id=agent_id,
+        capabilities=["resolve_conflicts"],
+    )
+    return memory.resolve_conflict(
+        stash_id=arguments.get("stash_id", ""),
+        resolution=arguments.get("resolution", "UNRESOLVED"),
+        token=token, agent_id=agent_id,
+    )
+
+
+@_tool_handler("declare_namespace")
+def _handle_declare_namespace(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    user_id = arguments.get("user_id", "default")
+    caller_agent_id = arguments.get("agent_id", "claude-code")
+    namespace = arguments.get("namespace", "default")
+    token = _session_token(
+        user_id=user_id, agent_id=caller_agent_id,
+        capabilities=["manage_namespaces"], namespaces=[namespace],
+    )
+    return memory.declare_namespace(
+        user_id=user_id, namespace=namespace,
+        description=arguments.get("description"), token=token, agent_id=caller_agent_id,
+    )
+
+
+@_tool_handler("grant_namespace_permission")
+def _handle_grant_namespace_permission(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    user_id = arguments.get("user_id", "default")
+    requester_agent_id = arguments.get("requester_agent_id", arguments.get("agent_id", "claude-code"))
+    namespace = arguments.get("namespace", "default")
+    token = _session_token(
+        user_id=user_id, agent_id=requester_agent_id,
+        capabilities=["manage_namespaces"], namespaces=[namespace],
+    )
+    return memory.grant_namespace_permission(
+        user_id=user_id, namespace=namespace,
+        agent_id=arguments.get("agent_id", "claude-code"),
+        capability=arguments.get("capability", "read"),
+        expires_at=arguments.get("expires_at"),
+        token=token, requester_agent_id=requester_agent_id,
+    )
+
+
+@_tool_handler("upsert_agent_policy")
+def _handle_upsert_agent_policy(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    user_id = arguments.get("user_id", "default")
+    requester_agent_id = arguments.get("requester_agent_id", arguments.get("agent_id", "claude-code"))
+    token = _session_token(user_id=user_id, agent_id=requester_agent_id, capabilities=["manage_namespaces"])
+    return memory.upsert_agent_policy(
+        user_id=user_id,
+        agent_id=arguments.get("agent_id", "claude-code"),
+        allowed_confidentiality_scopes=arguments.get("allowed_confidentiality_scopes"),
+        allowed_capabilities=arguments.get("allowed_capabilities"),
+        allowed_namespaces=arguments.get("allowed_namespaces"),
+        token=token, requester_agent_id=requester_agent_id,
+    )
+
+
+@_tool_handler("list_agent_policies")
+def _handle_list_agent_policies(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    user_id = arguments.get("user_id", "default")
+    requester_agent_id = arguments.get("requester_agent_id", arguments.get("agent_id", "claude-code"))
+    token = _session_token(user_id=user_id, agent_id=requester_agent_id, capabilities=["manage_namespaces"])
+    lookup_agent_id = arguments.get("agent_id")
+    if lookup_agent_id:
+        return memory.get_agent_policy(
+            user_id=user_id, agent_id=lookup_agent_id,
+            include_wildcard=arguments.get("include_wildcard", True),
+            token=token, requester_agent_id=requester_agent_id,
+        )
+    return memory.list_agent_policies(
+        user_id=user_id, token=token, requester_agent_id=requester_agent_id,
+    )
+
+
+@_tool_handler("delete_agent_policy")
+def _handle_delete_agent_policy(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    user_id = arguments.get("user_id", "default")
+    requester_agent_id = arguments.get("requester_agent_id", arguments.get("agent_id", "claude-code"))
+    token = _session_token(user_id=user_id, agent_id=requester_agent_id, capabilities=["manage_namespaces"])
+    return memory.delete_agent_policy(
+        user_id=user_id, agent_id=arguments.get("agent_id", "claude-code"),
+        token=token, requester_agent_id=requester_agent_id,
+    )
+
+
+@_tool_handler("get_agent_trust")
+def _handle_get_agent_trust(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    user_id = arguments.get("user_id", "default")
+    requester_agent_id = arguments.get("requester_agent_id", arguments.get("agent_id", "claude-code"))
+    token = _session_token(user_id=user_id, agent_id=requester_agent_id, capabilities=["read_trust"])
+    return memory.get_agent_trust(
+        user_id=user_id, agent_id=arguments.get("agent_id", "claude-code"),
+        token=token, requester_agent_id=requester_agent_id,
+    )
+
+
+@_tool_handler("run_sleep_cycle")
+def _handle_run_sleep_cycle(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    user_id = arguments.get("user_id", "default")
+    caller_agent_id = arguments.get("agent_id", "claude-code")
+    token = _session_token(user_id=user_id, agent_id=caller_agent_id, capabilities=["run_sleep_cycle"])
+    return memory.run_sleep_cycle(
+        user_id=arguments.get("user_id"),
+        date_str=arguments.get("date"),
+        apply_decay=arguments.get("apply_decay", True),
+        cleanup_stale_refs=arguments.get("cleanup_stale_refs", True),
+        token=token, agent_id=caller_agent_id,
+    )
+
+
+@_tool_handler("get_scene")
+def _handle_get_scene(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    user_id = arguments.get("user_id", "default")
+    agent_id = arguments.get("agent_id", "claude-code")
+    token = _session_token(user_id=user_id, agent_id=agent_id, capabilities=["read_scene"])
+    scene = memory.kernel.get_scene(
+        scene_id=arguments.get("scene_id", ""),
+        user_id=user_id, agent_id=agent_id, token=token,
+    )
+    return scene if scene else {"error": "Scene not found"}
+
+
+@_tool_handler("list_scenes")
+def _handle_list_scenes(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    scenes = memory.get_scenes(
+        user_id=arguments.get("user_id", "default"),
+        topic=arguments.get("topic"),
+        start_after=arguments.get("start_after"),
+        start_before=arguments.get("start_before"),
+        limit=arguments.get("limit", 20),
+    )
+    return {
+        "scenes": [
+            {
+                "id": s["id"],
+                "title": s.get("title"),
+                "topic": s.get("topic"),
+                "summary": s.get("summary"),
+                "start_time": s.get("start_time"),
+                "end_time": s.get("end_time"),
+                "memory_count": len(s.get("memory_ids", [])),
+            }
+            for s in scenes
+        ],
+        "total": len(scenes),
+    }
+
+
+@_tool_handler("search_scenes")
+def _handle_search_scenes(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    user_id = arguments.get("user_id", "default")
+    agent_id = arguments.get("agent_id", "claude-code")
+    token = _session_token(user_id=user_id, agent_id=agent_id, capabilities=["read_scene"])
+    payload = memory.kernel.search_scenes(
+        query=arguments.get("query", ""),
+        user_id=user_id, agent_id=agent_id, token=token,
+        limit=arguments.get("limit", 10),
+    )
+    scenes = payload.get("scenes", [])
+    return {
+        "scenes": [
+            {
+                "id": s.get("id"),
+                "title": s.get("title"),
+                "summary": s.get("summary", s.get("details")),
+                "topic": s.get("topic"),
+                "start_time": s.get("start_time", s.get("time")),
+                "search_score": s.get("search_score"),
+                "memory_count": len(s.get("memory_ids", [])),
+                "masked": bool(s.get("masked", False)),
+            }
+            for s in scenes
+        ],
+        "total": len(scenes),
+    }
+
+
+# ---- Active Memory (signal bus) helpers and handlers ----
+
+_active_store = None
+
+
+def _get_active_store(memory: Memory):
+    """Lazy-initialize the global active memory store."""
+    global _active_store
+    if _active_store is None:
+        if memory.config.active.enabled:
+            from engram.core.active_memory import ActiveMemoryStore
+            _active_store = ActiveMemoryStore(memory.config.active)
+    return _active_store
+
+
+@_tool_handler("signal_write")
+def _handle_signal_write(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    active = _get_active_store(memory)
+    if not active:
+        return {"error": "Active memory is disabled"}
+    return active.write_signal(
+        key=arguments["key"],
+        value=arguments["value"],
+        signal_type=arguments.get("signal_type", "state"),
+        scope=arguments.get("scope", "global"),
+        scope_key=arguments.get("scope_key"),
+        ttl_tier=arguments.get("ttl_tier", "notable"),
+        source_agent_id=arguments.get("agent_id"),
+        user_id=arguments.get("user_id", "default"),
+    )
+
+
+@_tool_handler("signal_read")
+def _handle_signal_read(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    active = _get_active_store(memory)
+    if not active:
+        return {"error": "Active memory is disabled"}
+    return active.read_signals(
+        scope=arguments.get("scope"),
+        scope_key=arguments.get("scope_key"),
+        signal_type=arguments.get("signal_type"),
+        user_id=arguments.get("user_id", "default"),
+        reader_agent_id=arguments.get("agent_id"),
+        limit=arguments.get("limit"),
+    )
+
+
+@_tool_handler("signal_clear")
+def _handle_signal_clear(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    active = _get_active_store(memory)
+    if not active:
+        return {"error": "Active memory is disabled"}
+    return active.clear_signals(
+        key=arguments.get("key"),
+        scope=arguments.get("scope"),
+        scope_key=arguments.get("scope_key"),
+        source_agent_id=arguments.get("agent_id"),
+        signal_type=arguments.get("signal_type"),
+        user_id=arguments.get("user_id", "default"),
+    )
 
 
 @server.call_tool()
@@ -891,31 +1689,13 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         memory = get_memory()
         result: Any = None
 
-        def _session_token(
-            *,
-            user_id: str,
-            agent_id: Optional[str],
-            capabilities: List[str],
-            namespaces: Optional[List[str]] = None,
-        ) -> str:
-            session = memory.create_session(
-                user_id=user_id,
-                agent_id=agent_id,
-                allowed_confidentiality_scopes=["work", "personal", "finance", "health", "private"],
-                capabilities=capabilities,
-                namespaces=namespaces,
-                ttl_minutes=24 * 60,
-            )
-            return session["token"]
+        def _session_token(*, user_id: str, agent_id: Optional[str], capabilities: List[str], namespaces: Optional[List[str]] = None) -> str:
+            return _make_session_token(memory, user_id=user_id, agent_id=agent_id, capabilities=capabilities, namespaces=namespaces)
 
-        def _preview(value: Any, limit: int = 1200) -> str:
-            try:
-                text = json.dumps(value, default=str)
-            except Exception:
-                text = str(value)
-            if len(text) > limit:
-                return text[:limit] + "...(truncated)"
-            return text
+        def _handoff_error_payload(exc: Exception) -> Dict[str, str]:
+            if isinstance(exc, HandoffBackendError):
+                return exc.to_dict()
+            return classify_handoff_error(exc).to_dict()
 
         auto_handoff_enabled = bool(
             getattr(memory, "handoff_processor", None)
@@ -924,8 +1704,9 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
         )
         auto_handoff_skip_tools = {"save_session_digest", "get_last_session", "list_sessions"}
         auto_handoff_context: Dict[str, Any] = {}
-        auto_handoff_token: Optional[str] = None
+        auto_handoff_meta: Dict[str, Any] = {}
         auto_resume_packet: Optional[Dict[str, Any]] = None
+        handoff_backend = None
 
         if auto_handoff_enabled and name not in auto_handoff_skip_tools:
             caller_agent_id = (
@@ -956,518 +1737,91 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                 "confidentiality_scope": arguments.get("confidentiality_scope", "work"),
             }
             try:
-                auto_handoff_token = _session_token(
+                handoff_backend = get_handoff_backend(memory)
+            except Exception as backend_exc:
+                auto_handoff_meta["error"] = _handoff_error_payload(backend_exc)
+                handoff_backend = None
+
+            if handoff_backend is not None:
+                auto_handoff_key = _handoff_key(
                     user_id=user_id,
                     agent_id=caller_agent_id,
-                    capabilities=["read_handoff", "write_handoff"],
-                    namespaces=[namespace],
-                )
-            except Exception:
-                auto_handoff_token = None
-            try:
-                auto_resume_packet = memory.auto_resume_context(
-                    user_id=user_id,
-                    agent_id=caller_agent_id,
-                    repo_path=repo_path,
-                    branch=arguments.get("branch"),
-                    lane_type=arguments.get("lane_type", "general"),
-                    objective=objective,
-                    agent_role=arguments.get("agent_role"),
                     namespace=namespace,
-                    token=auto_handoff_token,
-                    requester_agent_id=caller_agent_id,
-                    auto_create=True,
+                    repo_id=None,
+                    repo_path=repo_path,
                 )
+                now_ts = time.time()
+                with _lifecycle_lock:
+                    previous_context = dict(_lifecycle_state.get(auto_handoff_key, {}))
+                last_activity_ts = float(previous_context.get("last_activity_ts", now_ts))
+                idle_for_seconds = max(0.0, now_ts - last_activity_ts)
+                if (
+                    previous_context
+                    and idle_for_seconds >= _idle_pause_seconds
+                    and "agent_pause" in getattr(memory.handoff_config, "auto_checkpoint_events", [])
+                ):
+                    try:
+                        pause_result = _emit_lifecycle_checkpoint(
+                            memory,
+                            previous_context,
+                            event_type="agent_pause",
+                            task_summary=previous_context.get("task_summary") or f"Idle pause before {name}",
+                        )
+                        auto_handoff_meta["pause"] = pause_result
+                    except Exception as pause_exc:
+                        auto_handoff_meta["pause"] = {"error": _handoff_error_payload(pause_exc)}
+
+                try:
+                    auto_resume_packet = handoff_backend.auto_resume_context(
+                        user_id=user_id,
+                        agent_id=caller_agent_id,
+                        namespace=namespace,
+                        repo_path=repo_path,
+                        branch=arguments.get("branch"),
+                        lane_type=arguments.get("lane_type", "general"),
+                        objective=objective,
+                        agent_role=arguments.get("agent_role"),
+                    )
+                    if auto_resume_packet:
+                        auto_handoff_context["lane_id"] = auto_resume_packet.get("lane_id") or auto_handoff_context["lane_id"]
+                        auto_handoff_context["repo_id"] = auto_resume_packet.get("repo_id")
+                        auto_handoff_context["task_summary"] = auto_resume_packet.get("task_summary")
+                except Exception as resume_exc:
+                    auto_handoff_meta["error"] = _handoff_error_payload(resume_exc)
+                    auto_resume_packet = None
+
+            if handoff_backend is None and _strict_handoff_enabled(memory):
+                auto_handoff_meta.setdefault(
+                    "error",
+                    {"code": "hosted_backend_unavailable", "message": "Handoff backend is unavailable"},
+                )
+
+            if handoff_backend is not None and auto_resume_packet is None and "error" not in auto_handoff_meta:
+                auto_handoff_meta["error"] = {
+                    "code": "lane_resolution_failed",
+                    "message": "Unable to build resume context",
+                }
+        elif auto_handoff_enabled:
+            try:
+                handoff_backend = get_handoff_backend(memory)
             except Exception:
-                auto_resume_packet = None
+                handoff_backend = None
 
-        if name in {"add_memory", "propose_write"}:
-            content = arguments.get("content", "")
-            user_id = arguments.get("user_id", "default")
-            agent_id = arguments.get("agent_id")
-            categories = arguments.get("categories")
-            metadata = arguments.get("metadata")
-            scope = arguments.get("scope", "work")
-            namespace = arguments.get("namespace", "default")
-            mode = arguments.get("mode", "staging")
-            source_event_id = arguments.get("source_event_id")
-            token = _session_token(
-                user_id=user_id,
-                agent_id=agent_id,
-                capabilities=["propose_write"],
-                namespaces=[namespace],
-            )
+        if auto_handoff_context:
+            _record_handoff_context(auto_handoff_context)
 
-            result = memory.propose_write(
-                content=content,
-                user_id=user_id,
-                agent_id=agent_id,
-                categories=categories,
-                metadata=metadata,
-                scope=scope,
-                namespace=namespace,
-                mode=mode,
-                infer=False,
-                token=token,
-                source_app="mcp",
-                source_type="mcp",
-                source_event_id=source_event_id,
-            )
+        # Tool dispatch: registry handles all tools except handoff tools
+        # (which need access to the local handoff_backend variable).
+        handler = _TOOL_HANDLERS.get(name)
+        if handler:
+            result = handler(memory, arguments, _session_token, _preview)
 
-        elif name == "search_memory":
-            query = arguments.get("query", "")
-            user_id = arguments.get("user_id", "default")
-            agent_id = arguments.get("agent_id")
-            limit = arguments.get("limit", 10)
-            categories = arguments.get("categories")
-            agent_category = arguments.get("agent_category")
-            connector_ids = arguments.get("connector_ids")
-            scope_filter = arguments.get("scope_filter")
-            if agent_id:
-                token = _session_token(
-                    user_id=user_id,
-                    agent_id=agent_id,
-                    capabilities=["search"],
-                )
-                result = memory.search_with_context(
-                    query=query,
-                    user_id=user_id,
-                    agent_id=agent_id,
-                    token=token,
-                    limit=limit,
-                    categories=categories,
-                )
-            else:
-                result = memory.search(
-                    query=query,
-                    user_id=user_id,
-                    agent_id=agent_id,
-                    limit=limit,
-                    categories=categories,
-                    agent_category=agent_category,
-                    connector_ids=connector_ids,
-                    scope_filter=scope_filter,
-                )
-            # Simplify results for readability
-            if "results" in result:
-                result["results"] = [
-                    {
-                        "id": r.get("id"),
-                        "memory": r.get("memory", r.get("details", "")),
-                        "score": round(r.get("composite_score", r.get("score", 0)), 3),
-                        "layer": r.get("layer", "sml"),
-                        "categories": r.get("categories", []),
-                        "scope": r.get("scope"),
-                        "agent_category": r.get("agent_category"),
-                        "connector_id": r.get("connector_id"),
-                    }
-                    for r in result["results"]
-                ]
-
-        elif name == "get_all_memories":
-            user_id = arguments.get("user_id", "default")
-            agent_id = arguments.get("agent_id")
-            limit = arguments.get("limit", 50)
-            layer = arguments.get("layer")
-
-            result = memory.get_all(
-                user_id=user_id,
-                agent_id=agent_id,
-                limit=limit,
-                layer=layer,
-            )
-            # Simplify results
-            if "results" in result:
-                result["results"] = [
-                    {
-                        "id": r["id"],
-                        "memory": r["memory"],
-                        "layer": r.get("layer", "sml"),
-                        "strength": round(r.get("strength", 1.0), 3),
-                        "categories": r.get("categories", []),
-                    }
-                    for r in result["results"]
-                ]
-
-        elif name == "get_memory":
-            memory_id = arguments.get("memory_id", "")
-            result = memory.get(memory_id)
-            if result:
-                result = {
-                    "id": result["id"],
-                    "memory": result["memory"],
-                    "layer": result.get("layer", "sml"),
-                    "strength": round(result.get("strength", 1.0), 3),
-                    "categories": result.get("categories", []),
-                    "created_at": result.get("created_at"),
-                    "access_count": result.get("access_count", 0),
-                }
-            else:
-                result = {"error": "Memory not found"}
-
-        elif name == "update_memory":
-            memory_id = arguments.get("memory_id", "")
-            content = arguments.get("content", "")
-            result = memory.update(memory_id, content)
-
-        elif name == "delete_memory":
-            memory_id = arguments.get("memory_id", "")
-            result = memory.delete(memory_id)
-
-        elif name == "get_memory_stats":
-            user_id = arguments.get("user_id")
-            agent_id = arguments.get("agent_id")
-            result = memory.get_stats(user_id=user_id, agent_id=agent_id)
-
-        elif name == "apply_memory_decay":
-            user_id = arguments.get("user_id")
-            agent_id = arguments.get("agent_id")
-            scope = {"user_id": user_id, "agent_id": agent_id} if user_id or agent_id else None
-            result = memory.apply_decay(scope=scope)
-
-        elif name == "engram_context":
-            user_id = arguments.get("user_id", "default")
-            limit = arguments.get("limit", 15)
-            all_result = memory.get_all(user_id=user_id, limit=limit * 3)
-            all_memories = all_result.get("results", [])
-            # Sort: LML first, then by strength descending
-            layer_order = {"lml": 0, "sml": 1}
-            all_memories.sort(key=lambda m: (
-                layer_order.get(m.get("layer", "sml"), 1),
-                -float(m.get("strength", 1.0))
-            ))
-            digest = [
-                {
-                    "id": m["id"],
-                    "memory": m.get("memory", ""),
-                    "layer": m.get("layer", "sml"),
-                    "strength": round(float(m.get("strength", 1.0)), 3),
-                    "categories": m.get("categories", []),
-                }
-                for m in all_memories[:limit]
-            ]
-            result = {"digest": digest, "total_in_store": len(all_memories), "returned": len(digest)}
-
-        elif name == "remember":
-            content = arguments.get("content", "")
-            categories = arguments.get("categories")
-            token = _session_token(
-                user_id="default",
-                agent_id="claude-code",
-                capabilities=["propose_write"],
-                namespaces=[arguments.get("namespace", "default")],
-            )
-            result = memory.propose_write(
-                content=content,
-                user_id="default",
-                agent_id="claude-code",
-                categories=categories,
-                scope=arguments.get("scope", "work"),
-                namespace=arguments.get("namespace", "default"),
-                mode=arguments.get("mode", "staging"),
-                source_app="claude-code",
-                source_type="mcp",
-                infer=False,
-                token=token,
-            )
-
-        elif name == "list_pending_commits":
-            user_id = arguments.get("user_id", "default")
-            agent_id = arguments.get("agent_id", "claude-code")
-            token = _session_token(
-                user_id=user_id,
-                agent_id=agent_id,
-                capabilities=["review_commits"],
-            )
-            result = memory.list_pending_commits(
-                user_id=user_id,
-                agent_id=agent_id,
-                token=token,
-                status=arguments.get("status"),
-                limit=arguments.get("limit", 100),
-            )
-
-        elif name == "resolve_conflict":
-            agent_id = arguments.get("agent_id", "claude-code")
-            # Conflict ownership is resolved from stash; session user can stay default.
-            token = _session_token(
-                user_id=arguments.get("user_id", "default"),
-                agent_id=agent_id,
-                capabilities=["resolve_conflicts"],
-            )
-            result = memory.resolve_conflict(
-                stash_id=arguments.get("stash_id", ""),
-                resolution=arguments.get("resolution", "UNRESOLVED"),
-                token=token,
-                agent_id=agent_id,
-            )
-
-        elif name == "declare_namespace":
-            user_id = arguments.get("user_id", "default")
-            caller_agent_id = arguments.get("agent_id", "claude-code")
-            token = _session_token(
-                user_id=user_id,
-                agent_id=caller_agent_id,
-                capabilities=["manage_namespaces"],
-                namespaces=[arguments.get("namespace", "default")],
-            )
-            result = memory.declare_namespace(
-                user_id=user_id,
-                namespace=arguments.get("namespace", "default"),
-                description=arguments.get("description"),
-                token=token,
-                agent_id=caller_agent_id,
-            )
-
-        elif name == "grant_namespace_permission":
-            user_id = arguments.get("user_id", "default")
-            requester_agent_id = arguments.get("requester_agent_id", arguments.get("agent_id", "claude-code"))
-            token = _session_token(
-                user_id=user_id,
-                agent_id=requester_agent_id,
-                capabilities=["manage_namespaces"],
-                namespaces=[arguments.get("namespace", "default")],
-            )
-            result = memory.grant_namespace_permission(
-                user_id=user_id,
-                namespace=arguments.get("namespace", "default"),
-                agent_id=arguments.get("agent_id", "claude-code"),
-                capability=arguments.get("capability", "read"),
-                expires_at=arguments.get("expires_at"),
-                token=token,
-                requester_agent_id=requester_agent_id,
-            )
-
-        elif name == "upsert_agent_policy":
-            user_id = arguments.get("user_id", "default")
-            requester_agent_id = arguments.get("requester_agent_id", arguments.get("agent_id", "claude-code"))
-            token = _session_token(
-                user_id=user_id,
-                agent_id=requester_agent_id,
-                capabilities=["manage_namespaces"],
-            )
-            result = memory.upsert_agent_policy(
-                user_id=user_id,
-                agent_id=arguments.get("agent_id", "claude-code"),
-                allowed_confidentiality_scopes=arguments.get("allowed_confidentiality_scopes"),
-                allowed_capabilities=arguments.get("allowed_capabilities"),
-                allowed_namespaces=arguments.get("allowed_namespaces"),
-                token=token,
-                requester_agent_id=requester_agent_id,
-            )
-
-        elif name == "list_agent_policies":
-            user_id = arguments.get("user_id", "default")
-            requester_agent_id = arguments.get("requester_agent_id", arguments.get("agent_id", "claude-code"))
-            token = _session_token(
-                user_id=user_id,
-                agent_id=requester_agent_id,
-                capabilities=["manage_namespaces"],
-            )
-            lookup_agent_id = arguments.get("agent_id")
-            if lookup_agent_id:
-                result = memory.get_agent_policy(
-                    user_id=user_id,
-                    agent_id=lookup_agent_id,
-                    include_wildcard=arguments.get("include_wildcard", True),
-                    token=token,
-                    requester_agent_id=requester_agent_id,
-                )
-            else:
-                result = memory.list_agent_policies(
-                    user_id=user_id,
-                    token=token,
-                    requester_agent_id=requester_agent_id,
-                )
-
-        elif name == "delete_agent_policy":
-            user_id = arguments.get("user_id", "default")
-            requester_agent_id = arguments.get("requester_agent_id", arguments.get("agent_id", "claude-code"))
-            token = _session_token(
-                user_id=user_id,
-                agent_id=requester_agent_id,
-                capabilities=["manage_namespaces"],
-            )
-            result = memory.delete_agent_policy(
-                user_id=user_id,
-                agent_id=arguments.get("agent_id", "claude-code"),
-                token=token,
-                requester_agent_id=requester_agent_id,
-            )
-
-        elif name == "get_agent_trust":
-            user_id = arguments.get("user_id", "default")
-            requester_agent_id = arguments.get("requester_agent_id", arguments.get("agent_id", "claude-code"))
-            token = _session_token(
-                user_id=user_id,
-                agent_id=requester_agent_id,
-                capabilities=["read_trust"],
-            )
-            result = memory.get_agent_trust(
-                user_id=user_id,
-                agent_id=arguments.get("agent_id", "claude-code"),
-                token=token,
-                requester_agent_id=requester_agent_id,
-            )
-
-        elif name == "run_sleep_cycle":
-            user_id = arguments.get("user_id", "default")
-            caller_agent_id = arguments.get("agent_id", "claude-code")
-            token = _session_token(
-                user_id=user_id,
-                agent_id=caller_agent_id,
-                capabilities=["run_sleep_cycle"],
-            )
-            result = memory.run_sleep_cycle(
-                user_id=arguments.get("user_id"),
-                date_str=arguments.get("date"),
-                apply_decay=arguments.get("apply_decay", True),
-                cleanup_stale_refs=arguments.get("cleanup_stale_refs", True),
-                token=token,
-                agent_id=caller_agent_id,
-            )
-
-        # ---- Scene tools ----
-        elif name == "get_scene":
-            scene_id = arguments.get("scene_id", "")
-            user_id = arguments.get("user_id", "default")
-            agent_id = arguments.get("agent_id", "claude-code")
-            token = _session_token(
-                user_id=user_id,
-                agent_id=agent_id,
-                capabilities=["read_scene"],
-            )
-            scene = memory.kernel.get_scene(
-                scene_id=scene_id,
-                user_id=user_id,
-                agent_id=agent_id,
-                token=token,
-            )
-            if scene:
-                result = scene
-            else:
-                result = {"error": "Scene not found"}
-
-        elif name == "list_scenes":
-            user_id = arguments.get("user_id", "default")
-            scenes = memory.get_scenes(
-                user_id=user_id,
-                topic=arguments.get("topic"),
-                start_after=arguments.get("start_after"),
-                start_before=arguments.get("start_before"),
-                limit=arguments.get("limit", 20),
-            )
-            result = {
-                "scenes": [
-                    {
-                        "id": s["id"],
-                        "title": s.get("title"),
-                        "topic": s.get("topic"),
-                        "summary": s.get("summary"),
-                        "start_time": s.get("start_time"),
-                        "end_time": s.get("end_time"),
-                        "memory_count": len(s.get("memory_ids", [])),
-                    }
-                    for s in scenes
-                ],
-                "total": len(scenes),
-            }
-
-        elif name == "search_scenes":
-            query = arguments.get("query", "")
-            user_id = arguments.get("user_id", "default")
-            agent_id = arguments.get("agent_id", "claude-code")
-            limit = arguments.get("limit", 10)
-            token = _session_token(
-                user_id=user_id,
-                agent_id=agent_id,
-                capabilities=["read_scene"],
-            )
-            payload = memory.kernel.search_scenes(
-                query=query,
-                user_id=user_id,
-                agent_id=agent_id,
-                token=token,
-                limit=limit,
-            )
-            scenes = payload.get("scenes", [])
-            result = {
-                "scenes": [
-                    {
-                        "id": s.get("id"),
-                        "title": s.get("title"),
-                        "summary": s.get("summary", s.get("details")),
-                        "topic": s.get("topic"),
-                        "start_time": s.get("start_time", s.get("time")),
-                        "search_score": s.get("search_score"),
-                        "memory_count": len(s.get("memory_ids", [])),
-                        "masked": bool(s.get("masked", False)),
-                    }
-                    for s in scenes
-                ],
-                "total": len(scenes),
-            }
-
-        # ---- Profile tools ----
-        elif name == "get_profile":
-            profile_id = arguments.get("profile_id", "")
-            profile = memory.get_profile(profile_id)
-            if profile:
-                profile.pop("embedding", None)
-                result = profile
-            else:
-                result = {"error": "Profile not found"}
-
-        elif name == "list_profiles":
-            user_id = arguments.get("user_id", "default")
-            profiles = memory.get_all_profiles(user_id=user_id)
-            result = {
-                "profiles": [
-                    {
-                        "id": p["id"],
-                        "name": p.get("name"),
-                        "profile_type": p.get("profile_type"),
-                        "narrative": p.get("narrative"),
-                        "fact_count": len(p.get("facts", [])),
-                        "preference_count": len(p.get("preferences", [])),
-                    }
-                    for p in profiles
-                ],
-                "total": len(profiles),
-            }
-
-        elif name == "search_profiles":
-            query = arguments.get("query", "")
-            user_id = arguments.get("user_id", "default")
-            limit = arguments.get("limit", 10)
-            profiles = memory.search_profiles(query=query, user_id=user_id, limit=limit)
-            result = {
-                "profiles": [
-                    {
-                        "id": p["id"],
-                        "name": p.get("name"),
-                        "profile_type": p.get("profile_type"),
-                        "narrative": p.get("narrative"),
-                        "facts": p.get("facts", [])[:5],
-                        "search_score": p.get("search_score"),
-                    }
-                    for p in profiles
-                ],
-                "total": len(profiles),
-            }
-
-        # ---- Handoff tools ----
+        # ---- Handoff tools (need local handoff_backend) ----
         elif name == "save_session_digest":
             user_id = arguments.get("user_id", "default")
             agent_id = arguments.get("agent_id", "claude-code")
             requester_agent_id = arguments.get("requester_agent_id", agent_id)
             namespace = arguments.get("namespace", "default")
-            token = _session_token(
-                user_id=user_id,
-                agent_id=requester_agent_id,
-                capabilities=["write_handoff"],
-                namespaces=[namespace],
-            )
             task_summary = str(arguments.get("task_summary", "")).strip()
             if not task_summary:
                 result = {"error": "task_summary is required"}
@@ -1492,13 +1846,18 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                     "started_at": arguments.get("started_at"),
                     "ended_at": arguments.get("ended_at"),
                 }
-                result = memory.save_session_digest(
-                    user_id,
-                    agent_id,
-                    digest,
-                    token=token,
-                    requester_agent_id=requester_agent_id,
-                )
+                try:
+                    handoff_backend = handoff_backend or get_handoff_backend(memory)
+                    result = handoff_backend.save_session_digest(
+                        user_id=user_id,
+                        agent_id=agent_id,
+                        requester_agent_id=requester_agent_id,
+                        namespace=namespace,
+                        digest=digest,
+                    )
+                except Exception as handoff_exc:
+                    error_payload = _handoff_error_payload(handoff_exc)
+                    result = {"error": error_payload["message"], "_handoff": {"error": error_payload}}
 
         elif name == "get_last_session":
             user_id = arguments.get("user_id", "default")
@@ -1508,25 +1867,21 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                 arguments.get("agent_id", "claude-code"),
             )
             namespace = arguments.get("namespace", "default")
-            token = _session_token(
-                user_id=user_id,
-                agent_id=requester_agent_id,
-                capabilities=["read_handoff"],
-                namespaces=[namespace],
-            )
             repo = arguments.get("repo")
-            session = memory.get_last_session(
-                user_id,
-                agent_id=agent_id,
-                repo=repo,
-                statuses=arguments.get("statuses"),
-                token=token,
-                requester_agent_id=requester_agent_id,
-            )
-            if session:
-                result = session
-            else:
-                result = {"error": "No sessions found"}
+            try:
+                handoff_backend = handoff_backend or get_handoff_backend(memory)
+                session = handoff_backend.get_last_session(
+                    user_id=user_id,
+                    agent_id=agent_id,
+                    requester_agent_id=requester_agent_id,
+                    namespace=namespace,
+                    repo=repo,
+                    statuses=arguments.get("statuses"),
+                )
+                result = session if session else {"error": "No sessions found"}
+            except Exception as handoff_exc:
+                error_payload = _handoff_error_payload(handoff_exc)
+                result = {"error": error_payload["message"], "_handoff": {"error": error_payload}}
 
         elif name == "list_sessions":
             user_id = arguments.get("user_id", "default")
@@ -1535,39 +1890,38 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                 arguments.get("agent_id", "claude-code"),
             )
             namespace = arguments.get("namespace", "default")
-            token = _session_token(
-                user_id=user_id,
-                agent_id=requester_agent_id,
-                capabilities=["read_handoff"],
-                namespaces=[namespace],
-            )
-            sessions = memory.list_sessions(
-                user_id=user_id,
-                agent_id=arguments.get("agent_id"),
-                repo=arguments.get("repo"),
-                status=arguments.get("status"),
-                statuses=arguments.get("statuses"),
-                limit=arguments.get("limit", 20),
-                token=token,
-                requester_agent_id=requester_agent_id,
-            )
-            result = {
-                "sessions": [
-                    {
-                        "id": s["id"],
-                        "agent_id": s.get("agent_id"),
-                        "repo": s.get("repo"),
-                        "repo_id": s.get("repo_id"),
-                        "lane_id": s.get("lane_id"),
-                        "status": s.get("status"),
-                        "task_summary": s.get("task_summary", "")[:200],
-                        "last_checkpoint_at": s.get("last_checkpoint_at"),
-                        "updated_at": s.get("updated_at"),
-                    }
-                    for s in sessions
-                ],
-                "total": len(sessions),
-            }
+            try:
+                handoff_backend = handoff_backend or get_handoff_backend(memory)
+                sessions = handoff_backend.list_sessions(
+                    user_id=user_id,
+                    agent_id=arguments.get("agent_id"),
+                    requester_agent_id=requester_agent_id,
+                    namespace=namespace,
+                    repo=arguments.get("repo"),
+                    status=arguments.get("status"),
+                    statuses=arguments.get("statuses"),
+                    limit=arguments.get("limit", 20),
+                )
+                result = {
+                    "sessions": [
+                        {
+                            "id": s["id"],
+                            "agent_id": s.get("agent_id"),
+                            "repo": s.get("repo"),
+                            "repo_id": s.get("repo_id"),
+                            "lane_id": s.get("lane_id"),
+                            "status": s.get("status"),
+                            "task_summary": s.get("task_summary", "")[:200],
+                            "last_checkpoint_at": s.get("last_checkpoint_at"),
+                            "updated_at": s.get("updated_at"),
+                        }
+                        for s in sessions
+                    ],
+                    "total": len(sessions),
+                }
+            except Exception as handoff_exc:
+                error_payload = _handoff_error_payload(handoff_exc)
+                result = {"error": error_payload["message"], "_handoff": {"error": error_payload}}
 
         else:
             result = {"error": f"Unknown tool: {name}"}
@@ -1602,30 +1956,57 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                 ),
             }
             try:
-                checkpoint_result = memory.auto_checkpoint(
+                handoff_backend = handoff_backend or get_handoff_backend(memory)
+                checkpoint_result = handoff_backend.auto_checkpoint(
                     user_id=auto_handoff_context["user_id"],
                     agent_id=auto_handoff_context["agent_id"],
-                    payload=checkpoint_payload,
-                    event_type="tool_complete",
+                    namespace=auto_handoff_context["namespace"],
                     repo_path=auto_handoff_context["repo_path"],
                     branch=auto_handoff_context["branch"],
-                    lane_id=auto_handoff_context["lane_id"],
+                    lane_id=auto_handoff_context.get("lane_id"),
                     lane_type=auto_handoff_context["lane_type"],
                     objective=auto_handoff_context["objective"],
                     agent_role=auto_handoff_context["agent_role"],
-                    namespace=auto_handoff_context["namespace"],
                     confidentiality_scope=auto_handoff_context["confidentiality_scope"],
-                    token=auto_handoff_token,
-                    requester_agent_id=auto_handoff_context["agent_id"],
+                    payload=checkpoint_payload,
+                    event_type="tool_complete",
                 )
+                if isinstance(checkpoint_result, dict) and checkpoint_result.get("lane_id"):
+                    auto_handoff_context["lane_id"] = checkpoint_result["lane_id"]
+                auto_handoff_context["task_summary"] = checkpoint_payload["task_summary"]
+                auto_handoff_context["context_snapshot"] = checkpoint_payload["context_snapshot"]
+                _record_handoff_context(auto_handoff_context)
             except Exception as checkpoint_exc:
-                checkpoint_result = {"error": str(checkpoint_exc)}
+                checkpoint_result = {"error": _handoff_error_payload(checkpoint_exc)}
 
             if isinstance(result, dict):
                 handoff_meta: Dict[str, Any] = {"checkpoint": checkpoint_result}
+                if auto_handoff_meta:
+                    handoff_meta.update(auto_handoff_meta)
                 if auto_resume_packet:
                     handoff_meta["resume"] = auto_resume_packet
                 result["_handoff"] = handoff_meta
+
+        if isinstance(result, dict) and auto_handoff_meta and "_handoff" not in result:
+            handoff_meta = dict(auto_handoff_meta)
+            if auto_resume_packet:
+                handoff_meta["resume"] = auto_resume_packet
+            result["_handoff"] = handoff_meta
+
+        # Active memory auto-injection: attach latest signals to every response
+        if isinstance(result, dict):
+            active_store = _get_active_store(memory)
+            if active_store:
+                try:
+                    signals = active_store.read_signals(
+                        user_id=arguments.get("user_id", "default"),
+                        reader_agent_id=arguments.get("agent_id"),
+                        limit=memory.config.active.max_signals_per_response,
+                    )
+                    if signals:
+                        result["_active"] = signals
+                except Exception:
+                    pass  # Never break tool responses for active memory errors
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
@@ -1643,6 +2024,7 @@ async def main():
 def run():
     """Entry point for the MCP server."""
     import asyncio
+    _register_shutdown_hooks()
     asyncio.run(main())
 
 

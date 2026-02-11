@@ -97,8 +97,6 @@ $RECYCLE.BIN/
 htmlcov/
 .tox/
 .hypothesis/
-test_*.py
-*_test.py
 
 # Claude Code
 .claude/

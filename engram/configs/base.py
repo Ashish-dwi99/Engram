@@ -3,6 +3,8 @@ from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field
 
+from engram.configs.active import ActiveMemoryConfig
+
 
 class VectorStoreConfig(BaseModel):
     provider: str = Field(default="qdrant")
@@ -119,6 +121,9 @@ class HandoffConfig(BaseModel):
     enable_handoff: bool = True
     auto_enrich: bool = True          # LLM-enrich digests with linked memories
     max_sessions_per_user: int = 100  # retain last N sessions
+    handoff_backend: str = "hosted"   # hosted|local
+    strict_handoff_auth: bool = True
+    allow_auto_trusted_bootstrap: bool = False
     auto_session_bus: bool = True
     auto_checkpoint_events: List[str] = Field(
         default_factory=lambda: ["tool_complete", "agent_pause", "agent_end"]
@@ -183,7 +188,8 @@ class MemoryConfig(BaseModel):
     echo: EchoMemConfig = Field(default_factory=EchoMemConfig)
     category: CategoryMemConfig = Field(default_factory=CategoryMemConfig)
     scope: ScopeConfig = Field(default_factory=ScopeConfig)
-    graph: KnowledgeGraphConfig = Field(default_factory=lambda: KnowledgeGraphConfig())
+    graph: KnowledgeGraphConfig = Field(default_factory=KnowledgeGraphConfig)
     scene: SceneConfig = Field(default_factory=SceneConfig)
     profile: ProfileConfig = Field(default_factory=ProfileConfig)
     handoff: HandoffConfig = Field(default_factory=HandoffConfig)
+    active: ActiveMemoryConfig = Field(default_factory=ActiveMemoryConfig)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from typing import Any, Dict, Iterable, List, Optional, Set
 
 from engram.core.policy import enforce_scope_on_results
@@ -15,6 +16,14 @@ class DualSearchEngine:
         self.memory = memory
         self.episodic_store = episodic_store
         self.ref_manager = ref_manager
+
+    @staticmethod
+    def _parse_float_env(name: str, default: float, *, minimum: float = 0.0, maximum: float = 1.0) -> float:
+        try:
+            value = float(os.environ.get(name, default))
+        except Exception:
+            value = float(default)
+        return min(maximum, max(minimum, value))
 
     def search(
         self,
@@ -42,8 +51,14 @@ class DualSearchEngine:
             limit=max(limit, 5),
         )
         visible_scenes = self._filter_scenes_by_namespace(episodic_scenes, allowed_namespaces)
-
-        promoted = intersection_promote(semantic_results, visible_scenes)
+        boost_weight = self._parse_float_env("ENGRAM_V2_DUAL_INTERSECTION_BOOST_WEIGHT", 0.22)
+        boost_cap = self._parse_float_env("ENGRAM_V2_DUAL_INTERSECTION_BOOST_CAP", 0.35)
+        promoted = intersection_promote(
+            semantic_results,
+            visible_scenes,
+            boost_weight=boost_weight,
+            max_boost=boost_cap,
+        )
         for item in promoted:
             if "confidentiality_scope" not in item:
                 row = self.memory.db.get_memory(item.get("id"))
@@ -70,10 +85,24 @@ class DualSearchEngine:
             visible_ids = [r.get("id") for r in final_results if r.get("id") and not r.get("masked")]
             self.ref_manager.record_retrieval_refs(visible_ids, agent_id=agent_id, strong=False)
 
+        promoted_intersections = sum(1 for item in promoted if item.get("episodic_match"))
+        boosted_items = sum(1 for item in promoted if float(item.get("intersection_boost", 0.0)) > 0.0)
+
         return {
             "results": final_results,
             "count": len(final_results),
             "context_packet": context_packet,
+            "retrieval_trace": {
+                "ranking_version": "dual_intersection_v2",
+                "strategy": "semantic_plus_episodic_intersection",
+                "semantic_candidates": len(semantic_results),
+                "scene_candidates": len(visible_scenes),
+                "intersection_candidates": int(promoted_intersections),
+                "boosted_candidates": int(boosted_items),
+                "boost_weight": float(boost_weight),
+                "boost_cap": float(boost_cap),
+                "masked_count": int(masked_count),
+            },
             "scene_hits": [
                 {
                     "scene_id": s.get("id"),

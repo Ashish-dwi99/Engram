@@ -4,7 +4,7 @@ import json
 import logging
 import os
 import uuid
-from datetime import datetime, date
+from datetime import datetime, date, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Union
 
@@ -183,6 +183,9 @@ class Memory(MemoryBase):
                 config={
                     "auto_enrich": self.handoff_config.auto_enrich,
                     "max_sessions": self.handoff_config.max_sessions_per_user,
+                    "handoff_backend": self.handoff_config.handoff_backend,
+                    "strict_handoff_auth": self.handoff_config.strict_handoff_auth,
+                    "allow_auto_trusted_bootstrap": self.handoff_config.allow_auto_trusted_bootstrap,
                     "auto_session_bus": self.handoff_config.auto_session_bus,
                     "lane_inactivity_minutes": self.handoff_config.lane_inactivity_minutes,
                     "max_lanes_per_user": self.handoff_config.max_lanes_per_user,
@@ -196,6 +199,28 @@ class Memory(MemoryBase):
 
         # v2 Personal Memory Kernel orchestration layer.
         self.kernel = PersonalMemoryKernel(self)
+
+        # Active memory store (lazy initialized)
+        self._active_store = None
+
+    @property
+    def active(self):
+        """Lazy-initialized Active Memory store for signal bus."""
+        if self._active_store is None and self.config.active.enabled:
+            from engram.core.active_memory import ActiveMemoryStore
+            self._active_store = ActiveMemoryStore(self.config.active)
+        return self._active_store
+
+    def consolidate_active(self) -> Dict[str, Any]:
+        """Run one consolidation cycle: promote important active signals to passive memory."""
+        if not self.active:
+            return {"skipped": True, "reason": "active memory disabled"}
+        from engram.core.consolidation import ConsolidationEngine
+        engine = ConsolidationEngine(self.active, self, self.config.active)
+        return engine.run_cycle()
+
+    def __repr__(self) -> str:
+        return f"Memory(db={self.db!r}, echo={self.echo_config.enable_echo}, scenes={self.scene_config.enable_scenes})"
 
     @classmethod
     def from_config(cls, config_dict: Dict[str, Any]):
@@ -261,324 +286,380 @@ class Memory(MemoryBase):
 
         results: List[Dict[str, Any]] = []
         for mem in memories_to_add:
-            content = mem.get("content", "").strip()
-            if not content:
-                continue
-
-            mem_categories = normalize_categories(categories or mem.get("categories"))
-            mem_metadata = dict(processed_metadata)
-            mem_metadata.update(mem.get("metadata", {}))
-            if app_id:
-                mem_metadata["app_id"] = app_id
-
-            role = mem_metadata.get("role", "user")
-            explicit_intent = detect_explicit_intent(content) if role == "user" else None
-            explicit_action = explicit_intent.action if explicit_intent else None
-            explicit_remember = bool(mem_metadata.get("explicit_remember")) or explicit_action == "remember"
-            explicit_forget = bool(mem_metadata.get("explicit_forget")) or explicit_action == "forget"
-
-            if explicit_forget:
-                query = explicit_intent.content if explicit_intent else ""
-                forget_filters = {"user_id": user_id} if user_id else dict(effective_filters)
-                forget_result = self._forget_by_query(query, forget_filters)
-                results.append(
-                    {
-                        "event": "FORGET",
-                        "query": query,
-                        "deleted_count": forget_result.get("deleted_count", 0),
-                        "deleted_ids": forget_result.get("deleted_ids", []),
-                    }
-                )
-                continue
-
-            if explicit_remember and explicit_intent and explicit_intent.content:
-                content = explicit_intent.content
-
-            blocked = detect_sensitive_categories(content)
-            allow_sensitive = bool(mem_metadata.get("allow_sensitive"))
-            if blocked and not allow_sensitive:
-                results.append(
-                    {
-                        "event": "BLOCKED",
-                        "reason": "sensitive",
-                        "blocked_categories": blocked,
-                        "memory": content,
-                    }
-                )
-                continue
-
-            if not explicit_remember and is_ephemeral(content):
-                results.append(
-                    {
-                        "event": "SKIP",
-                        "reason": "ephemeral",
-                        "memory": content,
-                    }
-                )
-                continue
-
-            store_agent_id = agent_id
-            store_run_id = run_id
-            store_app_id = app_id
-            store_filters = dict(effective_filters)
-            if "user_id" in store_filters or "agent_id" in store_filters:
-                store_filters.pop("run_id", None)
-
-            if explicit_remember:
-                store_agent_id = None
-                store_run_id = None
-                store_app_id = None
-                store_filters.pop("agent_id", None)
-                store_filters.pop("run_id", None)
-                store_filters.pop("app_id", None)
-                mem_metadata.pop("agent_id", None)
-                mem_metadata.pop("run_id", None)
-                mem_metadata.pop("app_id", None)
-                mem_metadata["policy_scope"] = "user"
-            else:
-                mem_metadata["policy_scope"] = "agent"
-
-            mem_metadata["policy_explicit"] = explicit_remember
-            resolved_agent_category = self._normalize_agent_category(
-                agent_category or mem_metadata.get("agent_category")
-            )
-            resolved_connector_id = self._normalize_connector_id(
-                connector_id or mem_metadata.get("connector_id")
-            )
-            resolved_scope = self._infer_scope(
-                scope=scope or mem_metadata.get("scope"),
-                connector_id=resolved_connector_id,
-                agent_category=resolved_agent_category,
-                policy_explicit=explicit_remember,
-                agent_id=store_agent_id,
-            )
-            mem_metadata["scope"] = resolved_scope
-            if resolved_agent_category:
-                mem_metadata["agent_category"] = resolved_agent_category
-            if resolved_connector_id:
-                mem_metadata["connector_id"] = resolved_connector_id
-            if source_app or mem_metadata.get("source_app"):
-                mem_metadata["source_app"] = source_app or mem_metadata.get("source_app")
-            high_confidence = explicit_remember or looks_high_confidence(content, mem_metadata)
-            policy_repeated = False
-            low_confidence = False
-
-            # CategoryMem: Auto-categorize if not provided
-            category_match = None
-            if (
-                self.category_processor
-                and self.category_config.auto_categorize
-                and not mem_categories
-            ):
-                category_match = self.category_processor.detect_category(
-                    content,
-                    metadata=mem_metadata,
-                    use_llm=self.category_config.use_llm_categorization,
-                )
-                mem_categories = [category_match.category_id]
-                mem_metadata["category_confidence"] = category_match.confidence
-                mem_metadata["category_auto"] = True
-
-            # EchoMem: Process through multi-modal echo encoding
-            echo_result = None
-            effective_strength = initial_strength
-            if self.echo_processor and self.echo_config.enable_echo:
-                depth_override = EchoDepth(echo_depth) if echo_depth else None
-                echo_result = self.echo_processor.process(content, depth=depth_override)
-                # Apply strength multiplier from echo depth
-                effective_strength = initial_strength * echo_result.strength_multiplier
-                # Add echo metadata
-                mem_metadata.update(echo_result.to_metadata())
-                # Auto-categorize if not provided
-                if not mem_categories and echo_result.category:
-                    mem_categories = [echo_result.category]
-
-            # Choose primary embedding text (optionally question-form for query matching)
-            primary_text = self._select_primary_text(content, echo_result)
-            embedding = self.embedder.embed(primary_text, memory_action="add")
-
-            nearest, similarity = self._nearest_memory(embedding, store_filters)
-            repeated_threshold = max(self.fadem_config.conflict_similarity_threshold - 0.05, 0.7)
-            if similarity >= repeated_threshold:
-                policy_repeated = True
-                high_confidence = True
-
-            if not explicit_remember and not high_confidence:
-                low_confidence = True
-
-            # Conflict resolution against nearest memory in scope
-            event = "ADD"
-            existing = None
-            if nearest and similarity >= self.fadem_config.conflict_similarity_threshold:
-                existing = nearest
-
-            if existing and self.fadem_config.enable_forgetting:
-                resolution = resolve_conflict(existing, content, self.llm, self.config.custom_conflict_prompt)
-
-                if resolution.classification == "CONTRADICTORY":
-                    self._demote_existing(existing, reason="CONTRADICTORY")
-                    event = "UPDATE"
-                elif resolution.classification == "SUBSUMES":
-                    content = resolution.merged_content or content
-                    self._demote_existing(existing, reason="SUBSUMES")
-                    event = "UPDATE"
-                elif resolution.classification == "SUBSUMED":
-                    # Boost existing memory and skip new
-                    boosted_strength = min(1.0, float(existing.get("strength", 1.0)) + 0.05)
-                    self.db.update_memory(existing["id"], {"strength": boosted_strength})
-                    self.db.increment_access(existing["id"])
-                    results.append(
-                        {
-                            "id": existing["id"],
-                            "memory": existing.get("memory", ""),
-                            "event": "NOOP",
-                            "layer": existing.get("layer", "sml"),
-                            "strength": boosted_strength,
-                        }
-                    )
-                    continue
-
-            if existing and event == "UPDATE" and resolution.classification == "SUBSUMES":
-                if self.echo_processor and self.echo_config.enable_echo:
-                    depth_override = None
-                    if echo_depth:
-                        depth_override = EchoDepth(echo_depth)
-                    elif echo_result:
-                        depth_override = echo_result.echo_depth
-                    echo_result = self.echo_processor.process(content, depth=depth_override)
-                    mem_metadata.update(echo_result.to_metadata())
-                    if not mem_categories and echo_result.category:
-                        mem_categories = [echo_result.category]
-
-                primary_text = self._select_primary_text(content, echo_result)
-                embedding = self.embedder.embed(primary_text, memory_action="add")
-
-            if policy_repeated:
-                mem_metadata["policy_repeated"] = True
-            if low_confidence:
-                mem_metadata["policy_low_confidence"] = True
-
-            if low_confidence:
-                effective_strength = min(effective_strength, 0.4)
-
-            layer = initial_layer
-            if layer == "auto":
-                layer = "sml"
-            if low_confidence:
-                layer = "sml"
-
-            confidentiality_scope = str(
-                mem_metadata.get("confidentiality_scope")
-                or mem_metadata.get("privacy_scope")
-                or "work"
-            ).lower()
-            source_type = (
-                mem_metadata.get("source_type")
-                or ("cli" if (source_app or "").lower() == "cli" else "mcp")
-            )
-            source_event_id = mem_metadata.get("source_event_id")
-            importance = mem_metadata.get("importance", 0.5)
-            sensitivity = mem_metadata.get("sensitivity", "normal")
-            namespace_value = str(mem_metadata.get("namespace", "default") or "default").strip() or "default"
-
-            memory_id = str(uuid.uuid4())
-            now = datetime.utcnow().isoformat()
-            memory_data = {
-                "id": memory_id,
-                "memory": content,
-                "user_id": user_id,
-                "agent_id": store_agent_id,
-                "run_id": store_run_id,
-                "app_id": store_app_id,
-                "metadata": mem_metadata,
-                "categories": mem_categories,
-                "immutable": immutable,
-                "expiration_date": expiration_date,
-                "created_at": now,
-                "updated_at": now,
-                "layer": layer,
-                "strength": effective_strength,
-                "access_count": 0,
-                "last_accessed": now,
-                "embedding": embedding,
-                "confidentiality_scope": confidentiality_scope,
-                "source_type": source_type,
-                "source_app": source_app or mem_metadata.get("source_app"),
-                "source_event_id": source_event_id,
-                "decay_lambda": self.fadem_config.sml_decay_rate,
-                "status": "active",
-                "importance": importance,
-                "sensitivity": sensitivity,
-                "namespace": namespace_value,
-            }
-
-            vectors, payloads, vector_ids = self._build_index_vectors(
-                memory_id=memory_id,
-                content=content,
-                primary_text=self._select_primary_text(content, echo_result),
-                embedding=embedding,
-                echo_result=echo_result,
-                metadata=mem_metadata,
-                categories=mem_categories,
+            result = self._process_single_memory(
+                mem=mem,
+                processed_metadata=processed_metadata,
+                effective_filters=effective_filters,
+                categories=categories,
                 user_id=user_id,
-                agent_id=store_agent_id,
-                run_id=store_run_id,
-                app_id=store_app_id,
+                agent_id=agent_id,
+                run_id=run_id,
+                app_id=app_id,
+                agent_category=agent_category,
+                connector_id=connector_id,
+                scope=scope,
+                source_app=source_app,
+                immutable=immutable,
+                expiration_date=expiration_date,
+                initial_layer=initial_layer,
+                initial_strength=initial_strength,
+                echo_depth=echo_depth,
             )
-
-            self.db.add_memory(memory_data)
-            self.vector_store.insert(vectors=vectors, payloads=payloads, ids=vector_ids)
-
-            # CategoryMem: Update category stats
-            if self.category_processor and mem_categories:
-                for cat_id in mem_categories:
-                    self.category_processor.update_category_stats(
-                        cat_id, effective_strength, is_addition=True
-                    )
-
-            # KnowledgeGraph: Extract entities and link memories
-            if self.knowledge_graph:
-                self.knowledge_graph.extract_entities(
-                    content=content,
-                    memory_id=memory_id,
-                    use_llm=self.graph_config.use_llm_extraction,
-                )
-                if self.graph_config.auto_link_entities:
-                    self.knowledge_graph.link_by_shared_entities(memory_id)
-
-            # SceneProcessor: Assign memory to a scene
-            if self.scene_processor:
-                try:
-                    self._assign_to_scene(memory_id, content, embedding, user_id, now)
-                except Exception as e:
-                    logger.warning(f"Scene assignment failed for {memory_id}: {e}")
-
-            # ProfileProcessor: Update profiles from content
-            if self.profile_processor:
-                try:
-                    self._update_profiles(memory_id, content, mem_metadata, user_id)
-                except Exception as e:
-                    logger.warning(f"Profile update failed for {memory_id}: {e}")
-
-            results.append(
-                {
-                    "id": memory_id,
-                    "memory": content,
-                    "event": event,
-                    "layer": layer,
-                    "strength": effective_strength,
-                    "echo_depth": echo_result.echo_depth.value if echo_result else None,
-                    "categories": mem_categories,
-                    "namespace": namespace_value,
-                    "vector_nodes": len(vectors) # Info for user
-                }
-            )
+            if result is not None:
+                results.append(result)
 
         # Persist categories after batch
         if self.category_processor:
             self._persist_categories()
 
         return {"results": results}
+
+    def _resolve_memory_metadata(
+        self,
+        *,
+        content: str,
+        mem_metadata: Dict[str, Any],
+        explicit_remember: bool,
+        agent_id: Optional[str],
+        run_id: Optional[str],
+        app_id: Optional[str],
+        effective_filters: Dict[str, Any],
+        agent_category: Optional[str],
+        connector_id: Optional[str],
+        scope: Optional[str],
+        source_app: Optional[str],
+    ) -> tuple:
+        """Resolve store identifiers, scope, and metadata for a single memory."""
+        store_agent_id = agent_id
+        store_run_id = run_id
+        store_app_id = app_id
+        store_filters = dict(effective_filters)
+        if "user_id" in store_filters or "agent_id" in store_filters:
+            store_filters.pop("run_id", None)
+
+        if explicit_remember:
+            store_agent_id = None
+            store_run_id = None
+            store_app_id = None
+            store_filters.pop("agent_id", None)
+            store_filters.pop("run_id", None)
+            store_filters.pop("app_id", None)
+            mem_metadata.pop("agent_id", None)
+            mem_metadata.pop("run_id", None)
+            mem_metadata.pop("app_id", None)
+            mem_metadata["policy_scope"] = "user"
+        else:
+            mem_metadata["policy_scope"] = "agent"
+
+        mem_metadata["policy_explicit"] = explicit_remember
+        resolved_agent_category = self._normalize_agent_category(
+            agent_category or mem_metadata.get("agent_category")
+        )
+        resolved_connector_id = self._normalize_connector_id(
+            connector_id or mem_metadata.get("connector_id")
+        )
+        resolved_scope = self._infer_scope(
+            scope=scope or mem_metadata.get("scope"),
+            connector_id=resolved_connector_id,
+            agent_category=resolved_agent_category,
+            policy_explicit=explicit_remember,
+            agent_id=store_agent_id,
+        )
+        mem_metadata["scope"] = resolved_scope
+        if resolved_agent_category:
+            mem_metadata["agent_category"] = resolved_agent_category
+        if resolved_connector_id:
+            mem_metadata["connector_id"] = resolved_connector_id
+        if source_app or mem_metadata.get("source_app"):
+            mem_metadata["source_app"] = source_app or mem_metadata.get("source_app")
+
+        return store_agent_id, store_run_id, store_app_id, store_filters
+
+    def _encode_memory(
+        self,
+        content: str,
+        echo_depth: Optional[str],
+        mem_categories: List[str],
+        mem_metadata: Dict[str, Any],
+        initial_strength: float,
+    ) -> tuple:
+        """Run echo encoding + embedding. Returns (echo_result, effective_strength, mem_categories, embedding)."""
+        echo_result = None
+        effective_strength = initial_strength
+        if self.echo_processor and self.echo_config.enable_echo:
+            depth_override = EchoDepth(echo_depth) if echo_depth else None
+            echo_result = self.echo_processor.process(content, depth=depth_override)
+            effective_strength = initial_strength * echo_result.strength_multiplier
+            mem_metadata.update(echo_result.to_metadata())
+            if not mem_categories and echo_result.category:
+                mem_categories = [echo_result.category]
+
+        primary_text = self._select_primary_text(content, echo_result)
+        embedding = self.embedder.embed(primary_text, memory_action="add")
+        return echo_result, effective_strength, mem_categories, embedding
+
+    def _process_single_memory(
+        self,
+        *,
+        mem: Dict[str, Any],
+        processed_metadata: Dict[str, Any],
+        effective_filters: Dict[str, Any],
+        categories: Optional[List[str]],
+        user_id: Optional[str],
+        agent_id: Optional[str],
+        run_id: Optional[str],
+        app_id: Optional[str],
+        agent_category: Optional[str],
+        connector_id: Optional[str],
+        scope: Optional[str],
+        source_app: Optional[str],
+        immutable: bool,
+        expiration_date: Optional[str],
+        initial_layer: str,
+        initial_strength: float,
+        echo_depth: Optional[str],
+    ) -> Optional[Dict[str, Any]]:
+        """Process and store a single memory item. Returns result dict or None if skipped."""
+        content = mem.get("content", "").strip()
+        if not content:
+            return None
+
+        mem_categories = normalize_categories(categories or mem.get("categories"))
+        mem_metadata = dict(processed_metadata)
+        mem_metadata.update(mem.get("metadata", {}))
+        if app_id:
+            mem_metadata["app_id"] = app_id
+
+        role = mem_metadata.get("role", "user")
+        explicit_intent = detect_explicit_intent(content) if role == "user" else None
+        explicit_action = explicit_intent.action if explicit_intent else None
+        explicit_remember = bool(mem_metadata.get("explicit_remember")) or explicit_action == "remember"
+        explicit_forget = bool(mem_metadata.get("explicit_forget")) or explicit_action == "forget"
+
+        if explicit_forget:
+            query = explicit_intent.content if explicit_intent else ""
+            forget_filters = {"user_id": user_id} if user_id else dict(effective_filters)
+            forget_result = self._forget_by_query(query, forget_filters)
+            return {
+                "event": "FORGET",
+                "query": query,
+                "deleted_count": forget_result.get("deleted_count", 0),
+                "deleted_ids": forget_result.get("deleted_ids", []),
+            }
+
+        if explicit_remember and explicit_intent and explicit_intent.content:
+            content = explicit_intent.content
+
+        blocked = detect_sensitive_categories(content)
+        allow_sensitive = bool(mem_metadata.get("allow_sensitive"))
+        if blocked and not allow_sensitive:
+            return {
+                "event": "BLOCKED",
+                "reason": "sensitive",
+                "blocked_categories": blocked,
+                "memory": content,
+            }
+
+        if not explicit_remember and is_ephemeral(content):
+            return {
+                "event": "SKIP",
+                "reason": "ephemeral",
+                "memory": content,
+            }
+
+        # Resolve store identifiers and scope metadata.
+        store_agent_id, store_run_id, store_app_id, store_filters = self._resolve_memory_metadata(
+            content=content,
+            mem_metadata=mem_metadata,
+            explicit_remember=explicit_remember,
+            agent_id=agent_id,
+            run_id=run_id,
+            app_id=app_id,
+            effective_filters=effective_filters,
+            agent_category=agent_category,
+            connector_id=connector_id,
+            scope=scope,
+            source_app=source_app,
+        )
+
+        high_confidence = explicit_remember or looks_high_confidence(content, mem_metadata)
+        policy_repeated = False
+        low_confidence = False
+
+        # CategoryMem: Auto-categorize if not provided
+        if (
+            self.category_processor
+            and self.category_config.auto_categorize
+            and not mem_categories
+        ):
+            category_match = self.category_processor.detect_category(
+                content,
+                metadata=mem_metadata,
+                use_llm=self.category_config.use_llm_categorization,
+            )
+            mem_categories = [category_match.category_id]
+            mem_metadata["category_confidence"] = category_match.confidence
+            mem_metadata["category_auto"] = True
+
+        # Encode memory (echo + embedding).
+        echo_result, effective_strength, mem_categories, embedding = self._encode_memory(
+            content, echo_depth, mem_categories, mem_metadata, initial_strength,
+        )
+
+        nearest, similarity = self._nearest_memory(embedding, store_filters)
+        repeated_threshold = max(self.fadem_config.conflict_similarity_threshold - 0.05, 0.7)
+        if similarity >= repeated_threshold:
+            policy_repeated = True
+            high_confidence = True
+
+        if not explicit_remember and not high_confidence:
+            low_confidence = True
+
+        # Conflict resolution against nearest memory in scope.
+        event = "ADD"
+        existing = None
+        resolution = None
+        if nearest and similarity >= self.fadem_config.conflict_similarity_threshold:
+            existing = nearest
+
+        if existing and self.fadem_config.enable_forgetting:
+            resolution = resolve_conflict(existing, content, self.llm, self.config.custom_conflict_prompt)
+
+            if resolution.classification == "CONTRADICTORY":
+                self._demote_existing(existing, reason="CONTRADICTORY")
+                event = "UPDATE"
+            elif resolution.classification == "SUBSUMES":
+                content = resolution.merged_content or content
+                self._demote_existing(existing, reason="SUBSUMES")
+                event = "UPDATE"
+            elif resolution.classification == "SUBSUMED":
+                boosted_strength = min(1.0, float(existing.get("strength", 1.0)) + 0.05)
+                self.db.update_memory(existing["id"], {"strength": boosted_strength})
+                self.db.increment_access(existing["id"])
+                return {
+                    "id": existing["id"],
+                    "memory": existing.get("memory", ""),
+                    "event": "NOOP",
+                    "layer": existing.get("layer", "sml"),
+                    "strength": boosted_strength,
+                }
+
+        if existing and event == "UPDATE" and resolution and resolution.classification == "SUBSUMES":
+            # Re-encode merged content.
+            echo_result, _, mem_categories, embedding = self._encode_memory(
+                content, echo_depth, mem_categories, mem_metadata, initial_strength,
+            )
+
+        if policy_repeated:
+            mem_metadata["policy_repeated"] = True
+        if low_confidence:
+            mem_metadata["policy_low_confidence"] = True
+            effective_strength = min(effective_strength, 0.4)
+
+        layer = initial_layer
+        if layer == "auto":
+            layer = "sml"
+        if low_confidence:
+            layer = "sml"
+
+        confidentiality_scope = str(
+            mem_metadata.get("confidentiality_scope")
+            or mem_metadata.get("privacy_scope")
+            or "work"
+        ).lower()
+        source_type = (
+            mem_metadata.get("source_type")
+            or ("cli" if (source_app or "").lower() == "cli" else "mcp")
+        )
+        namespace_value = str(mem_metadata.get("namespace", "default") or "default").strip() or "default"
+
+        memory_id = str(uuid.uuid4())
+        now = datetime.now(timezone.utc).isoformat()
+        memory_data = {
+            "id": memory_id,
+            "memory": content,
+            "user_id": user_id,
+            "agent_id": store_agent_id,
+            "run_id": store_run_id,
+            "app_id": store_app_id,
+            "metadata": mem_metadata,
+            "categories": mem_categories,
+            "immutable": immutable,
+            "expiration_date": expiration_date,
+            "created_at": now,
+            "updated_at": now,
+            "layer": layer,
+            "strength": effective_strength,
+            "access_count": 0,
+            "last_accessed": now,
+            "embedding": embedding,
+            "confidentiality_scope": confidentiality_scope,
+            "source_type": source_type,
+            "source_app": source_app or mem_metadata.get("source_app"),
+            "source_event_id": mem_metadata.get("source_event_id"),
+            "decay_lambda": self.fadem_config.sml_decay_rate,
+            "status": "active",
+            "importance": mem_metadata.get("importance", 0.5),
+            "sensitivity": mem_metadata.get("sensitivity", "normal"),
+            "namespace": namespace_value,
+        }
+
+        vectors, payloads, vector_ids = self._build_index_vectors(
+            memory_id=memory_id,
+            content=content,
+            primary_text=self._select_primary_text(content, echo_result),
+            embedding=embedding,
+            echo_result=echo_result,
+            metadata=mem_metadata,
+            categories=mem_categories,
+            user_id=user_id,
+            agent_id=store_agent_id,
+            run_id=store_run_id,
+            app_id=store_app_id,
+        )
+
+        self.db.add_memory(memory_data)
+        self.vector_store.insert(vectors=vectors, payloads=payloads, ids=vector_ids)
+
+        # Post-store hooks.
+        if self.category_processor and mem_categories:
+            for cat_id in mem_categories:
+                self.category_processor.update_category_stats(
+                    cat_id, effective_strength, is_addition=True
+                )
+
+        if self.knowledge_graph:
+            self.knowledge_graph.extract_entities(
+                content=content,
+                memory_id=memory_id,
+                use_llm=self.graph_config.use_llm_extraction,
+            )
+            if self.graph_config.auto_link_entities:
+                self.knowledge_graph.link_by_shared_entities(memory_id)
+
+        if self.scene_processor:
+            try:
+                self._assign_to_scene(memory_id, content, embedding, user_id, now)
+            except Exception as e:
+                logger.warning("Scene assignment failed for %s: %s", memory_id, e)
+
+        if self.profile_processor:
+            try:
+                self._update_profiles(memory_id, content, mem_metadata, user_id)
+            except Exception as e:
+                logger.warning("Profile update failed for %s: %s", memory_id, e)
+
+        return {
+            "id": memory_id,
+            "memory": content,
+            "event": event,
+            "layer": layer,
+            "strength": effective_strength,
+            "echo_depth": echo_result.echo_depth.value if echo_result else None,
+            "categories": mem_categories,
+            "namespace": namespace_value,
+            "vector_nodes": len(vectors),
+        }
 
     def search(
         self,
@@ -677,10 +758,20 @@ class Memory(MemoryBase):
                 # Record access to category
                 self.category_processor.access_category(query_category_id)
 
+        # Phase 2: Bulk-fetch all candidate memories to eliminate N+1 queries.
+        candidate_ids = [self._resolve_memory_id(vr) for vr in vector_results]
+        vr_by_id = {self._resolve_memory_id(vr): vr for vr in vector_results}
+        memories_bulk = self.db.get_memories_bulk(candidate_ids)
+
         results: List[Dict[str, Any]] = []
-        for vr in vector_results:
-            memory_id = self._resolve_memory_id(vr)
-            memory = self.db.get_memory(memory_id)
+        access_ids: List[str] = []
+        strength_updates: Dict[str, float] = {}
+        promotion_ids: List[str] = []
+        reecho_ids: List[str] = []
+        subscriber_ids: List[str] = []
+
+        for memory_id in candidate_ids:
+            memory = memories_bulk.get(memory_id)
             if not memory:
                 continue
 
@@ -709,6 +800,7 @@ class Memory(MemoryBase):
             ):
                 continue
 
+            vr = vr_by_id[memory_id]
             similarity = float(vr.score)
             strength = float(memory.get("strength", 1.0))
 
@@ -742,10 +834,8 @@ class Memory(MemoryBase):
             memory_categories = set(memory.get("categories", []))
             if use_category_boost and self.category_processor and query_category_id:
                 if query_category_id in memory_categories:
-                    # Direct category match
                     category_boost = self.category_config.category_boost_weight
                 elif memory_categories & related_category_ids:
-                    # Related category match
                     category_boost = self.category_config.cross_category_boost
                 combined = combined * (1 + category_boost)
 
@@ -753,7 +843,6 @@ class Memory(MemoryBase):
             graph_boost = 0.0
             if self.knowledge_graph:
                 memory_entities = self.knowledge_graph.memory_entities.get(memory["id"], set())
-                # Check if any query terms match entity names
                 for entity_name in memory_entities:
                     if entity_name.lower() in query_lower or any(
                         term in entity_name.lower() for term in query_terms
@@ -763,13 +852,13 @@ class Memory(MemoryBase):
                 combined = combined * (1 + graph_boost)
 
             if boost_on_access:
-                self.db.increment_access(memory["id"])
+                access_ids.append(memory["id"])
                 if self.fadem_config.access_strength_boost > 0:
                     boosted_strength = min(1.0, strength + self.fadem_config.access_strength_boost)
                     if boosted_strength != strength:
-                        self.db.update_memory(memory["id"], {"strength": boosted_strength})
+                        strength_updates[memory["id"]] = boosted_strength
                         strength = boosted_strength
-                self._check_promotion(memory["id"])
+                promotion_ids.append(memory["id"])
                 # EchoMem: Re-echo on frequent access
                 if (
                     self.echo_processor
@@ -777,9 +866,9 @@ class Memory(MemoryBase):
                     and memory.get("access_count", 0) >= self.echo_config.reecho_threshold
                     and metadata.get("echo_depth") != "deep"
                 ):
-                    self._reecho_memory(memory["id"])
+                    reecho_ids.append(memory["id"])
                 if agent_id:
-                    self.db.add_memory_subscriber(memory["id"], f"agent:{agent_id}", ref_type="weak")
+                    subscriber_ids.append(memory["id"])
 
             results.append(
                 {
@@ -817,6 +906,19 @@ class Memory(MemoryBase):
                     "graph_boost": graph_boost,
                 }
             )
+
+        # Phase 2: Batch DB writes instead of per-result round-trips.
+        if access_ids:
+            self.db.increment_access_bulk(access_ids)
+        if strength_updates:
+            self.db.update_strength_bulk(strength_updates)
+        for mid in promotion_ids:
+            self._check_promotion(mid)
+        for mid in reecho_ids:
+            self._reecho_memory(mid)
+        if agent_id:
+            for mid in subscriber_ids:
+                self.db.add_memory_subscriber(mid, f"agent:{agent_id}", ref_type="weak")
 
         # Persist category access updates
         if self.category_processor:
@@ -876,7 +978,7 @@ class Memory(MemoryBase):
             self.db.log_event(memory_id, "REECHO", old_strength=memory.get("strength"), new_strength=new_strength)
             self._update_vectors_for_memory(memory_id, metadata)
         except Exception as e:
-            logger.warning(f"Re-echo failed for memory {memory_id}: {e}")
+            logger.warning("Re-echo failed for memory %s: %s", memory_id, e)
 
     def get(self, memory_id: str) -> Optional[Dict[str, Any]]:
         memory = self.db.get_memory(memory_id)
@@ -1084,7 +1186,7 @@ class Memory(MemoryBase):
 
             new_strength = calculate_decayed_strength(
                 current_strength=memory.get("strength", 1.0),
-                last_accessed=memory.get("last_accessed", datetime.utcnow().isoformat()),
+                last_accessed=memory.get("last_accessed", datetime.now(timezone.utc).isoformat()),
                 access_count=memory.get("access_count", 0),
                 layer=memory.get("layer", "sml"),
                 config=self.fadem_config,
@@ -1511,7 +1613,7 @@ class Memory(MemoryBase):
                 extracted = [m for m in extracted if excludes.lower() not in m.get("content", "").lower()]
             return extracted
         except Exception as exc:
-            logger.warning(f"Failed to parse extraction response: {exc}")
+            logger.warning("Failed to parse extraction response: %s", exc)
             # Fallback: add last user message
             last_user = next((m for m in reversed(messages) if m.get("role") == "user"), None)
             if last_user:
@@ -1813,7 +1915,7 @@ class Memory(MemoryBase):
         metadata = dict(memory.get("metadata", {}))
         metadata["superseded"] = True
         metadata["superseded_reason"] = reason
-        metadata["superseded_at"] = datetime.utcnow().isoformat()
+        metadata["superseded_at"] = datetime.now(timezone.utc).isoformat()
 
         self.db.update_memory(
             memory["id"],
