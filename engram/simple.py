@@ -237,11 +237,14 @@ class Engram:
         )
         if isinstance(result, dict) and "results" in result:
             results = result["results"]
-            for entry in results:
-                if "content" not in entry and "memory" in entry:
-                    entry["content"] = entry.get("memory")
-            return results
-        return result
+        elif isinstance(result, list):
+            results = result
+        else:
+            return []
+        for entry in results:
+            if isinstance(entry, dict) and "content" not in entry and "memory" in entry:
+                entry["content"] = entry.get("memory")
+        return results
 
     def get(self, memory_id: str) -> Optional[Dict[str, Any]]:
         """Get a specific memory by ID.

@@ -9,6 +9,7 @@ from __future__ import annotations
 import re
 import json
 import logging
+from collections import deque
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional, Set, Tuple
 from enum import Enum
@@ -333,10 +334,11 @@ Return only valid JSON array, no explanation:"""
         """
         visited = {memory_id}
         results = []
-        queue = [(memory_id, 0, [])]
+        # Use deque for O(1) popleft instead of list.pop(0) which is O(n).
+        queue = deque([(memory_id, 0, [])])
 
         while queue:
-            current_id, depth, path = queue.pop(0)
+            current_id, depth, path = queue.popleft()
 
             if depth >= max_depth:
                 continue

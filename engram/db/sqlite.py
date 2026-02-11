@@ -18,6 +18,7 @@ VALID_MEMORY_COLUMNS = frozenset({
     "decay_lambda", "status", "importance", "sensitivity", "namespace",
     "access_count", "last_accessed", "immutable", "expiration_date",
     "scene_id", "user_id", "agent_id", "run_id", "app_id",
+    "memory_type", "s_fast", "s_mid", "s_slow",
 })
 
 VALID_SCENE_COLUMNS = frozenset({
@@ -30,6 +31,24 @@ VALID_PROFILE_COLUMNS = frozenset({
     "name", "profile_type", "narrative", "facts", "preferences",
     "relationships", "sentiment", "theory_of_mind", "aliases",
     "embedding", "strength", "updated_at", "role_bias", "profile_summary",
+})
+
+VALID_PROPOSAL_COMMIT_COLUMNS = frozenset({
+    "status", "checks", "preview", "provenance", "updated_at",
+})
+
+VALID_HANDOFF_SESSION_COLUMNS = frozenset({
+    "status", "task_summary", "decisions_made", "files_touched",
+    "todos_remaining", "context_snapshot", "linked_memory_ids",
+    "linked_scene_ids", "ended_at", "updated_at", "repo_id",
+    "blockers", "key_commands", "test_results", "lane_id",
+    "last_checkpoint_at", "namespace", "confidentiality_scope",
+})
+
+VALID_HANDOFF_LANE_COLUMNS = frozenset({
+    "status", "objective", "current_state", "namespace",
+    "confidentiality_scope", "last_checkpoint_at", "version",
+    "branch", "lane_type", "repo_id", "repo_path", "updated_at",
 })
 
 
@@ -53,7 +72,7 @@ class SQLiteManager:
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.execute("PRAGMA cache_size=-8000")  # 8MB cache
         self._conn.execute("PRAGMA temp_store=MEMORY")
         self._conn.row_factory = sqlite3.Row
@@ -546,6 +565,29 @@ class SQLiteManager:
                 );
                 CREATE INDEX IF NOT EXISTS idx_handoff_conflicts_lane ON handoff_lane_conflicts(lane_id, created_at DESC);
             """,
+            "v2_013": """
+                CREATE TABLE IF NOT EXISTS distillation_provenance (
+                    id TEXT PRIMARY KEY,
+                    semantic_memory_id TEXT NOT NULL,
+                    episodic_memory_id TEXT NOT NULL,
+                    distillation_run_id TEXT,
+                    created_at TEXT DEFAULT CURRENT_TIMESTAMP
+                );
+                CREATE INDEX IF NOT EXISTS idx_distill_prov_semantic ON distillation_provenance(semantic_memory_id);
+                CREATE INDEX IF NOT EXISTS idx_distill_prov_episodic ON distillation_provenance(episodic_memory_id);
+                CREATE INDEX IF NOT EXISTS idx_distill_prov_run ON distillation_provenance(distillation_run_id);
+
+                CREATE TABLE IF NOT EXISTS distillation_log (
+                    id TEXT PRIMARY KEY,
+                    run_at TEXT DEFAULT CURRENT_TIMESTAMP,
+                    user_id TEXT,
+                    episodes_sampled INTEGER DEFAULT 0,
+                    semantic_created INTEGER DEFAULT 0,
+                    semantic_deduplicated INTEGER DEFAULT 0,
+                    errors INTEGER DEFAULT 0
+                );
+                CREATE INDEX IF NOT EXISTS idx_distill_log_user ON distillation_log(user_id, run_at DESC);
+            """,
         }
 
         for version, ddl in migrations.items():
@@ -734,6 +776,32 @@ class SQLiteManager:
             "INSERT OR IGNORE INTO schema_migrations (version) VALUES ('v2_columns_complete')"
         )
 
+        # CLS Distillation Memory columns (idempotent).
+        self._ensure_cls_columns(conn)
+
+    def _ensure_cls_columns(self, conn: sqlite3.Connection) -> None:
+        """Add CLS Distillation Memory columns to memories table (idempotent)."""
+        if self._is_migration_applied(conn, "v2_cls_columns_complete"):
+            return
+
+        self._migrate_add_column_conn(conn, "memories", "memory_type", "TEXT DEFAULT 'semantic'")
+        self._migrate_add_column_conn(conn, "memories", "s_fast", "REAL DEFAULT NULL")
+        self._migrate_add_column_conn(conn, "memories", "s_mid", "REAL DEFAULT NULL")
+        self._migrate_add_column_conn(conn, "memories", "s_slow", "REAL DEFAULT NULL")
+
+        conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_memories_memory_type ON memories(memory_type, user_id)"
+        )
+
+        # Backfill: set memory_type to 'semantic' for existing memories.
+        conn.execute(
+            "UPDATE memories SET memory_type = 'semantic' WHERE memory_type IS NULL"
+        )
+
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES ('v2_cls_columns_complete')"
+        )
+
     def _seed_default_namespaces(self, conn: sqlite3.Connection) -> None:
         users = conn.execute(
             """
@@ -890,8 +958,9 @@ class SQLiteManager:
                     created_at, updated_at, layer, strength, access_count,
                     last_accessed, embedding, related_memories, source_memories, tombstone,
                     confidentiality_scope, namespace, source_type, source_app, source_event_id, decay_lambda,
-                    status, importance, sensitivity
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    status, importance, sensitivity,
+                    memory_type, s_fast, s_mid, s_slow
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """,
                 (
                     memory_id,
@@ -923,6 +992,10 @@ class SQLiteManager:
                     memory_data.get("status", "active"),
                     memory_data.get("importance", metadata.get("importance", 0.5)),
                     memory_data.get("sensitivity", metadata.get("sensitivity", "normal")),
+                    memory_data.get("memory_type", "semantic"),
+                    memory_data.get("s_fast"),
+                    memory_data.get("s_mid"),
+                    memory_data.get("s_slow"),
                 ),
             )
 
@@ -1007,6 +1080,7 @@ class SQLiteManager:
         include_tombstoned: bool = False,
         created_after: Optional[str] = None,
         created_before: Optional[str] = None,
+        limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         query = "SELECT * FROM memories WHERE strength >= ?"
         params: List[Any] = [min_strength]
@@ -1039,6 +1113,11 @@ class SQLiteManager:
             params.append(created_before)
 
         query += " ORDER BY strength DESC"
+
+        # Apply SQL-level LIMIT to avoid fetching unbounded rows into memory.
+        if limit is not None and limit > 0:
+            query += " LIMIT ?"
+            params.append(limit)
 
         with self._get_connection() as conn:
             rows = conn.execute(query, params).fetchall()
@@ -1216,9 +1295,129 @@ class SQLiteManager:
             )
 
     def purge_tombstoned(self) -> int:
+        """Permanently delete all tombstoned memories. This is IRREVERSIBLE."""
         with self._get_connection() as conn:
-            cursor = conn.execute("DELETE FROM memories WHERE tombstone = 1")
-            return cursor.rowcount
+            # Log what will be purged before deletion for audit trail.
+            rows = conn.execute(
+                "SELECT id, user_id, memory FROM memories WHERE tombstone = 1"
+            ).fetchall()
+            count = len(rows)
+            if count > 0:
+                ids = [row["id"] for row in rows]
+                logger.warning(
+                    "purge_tombstoned: permanently deleting %d memories: %s",
+                    count,
+                    ids,
+                )
+                for row in rows:
+                    conn.execute(
+                        """INSERT INTO memory_history (memory_id, event, old_value, new_value,
+                           old_strength, new_strength, old_layer, new_layer)
+                           VALUES (?, ?, ?, NULL, NULL, NULL, NULL, NULL)""",
+                        (row["id"], "PURGE", row["memory"]),
+                    )
+                conn.execute("DELETE FROM memories WHERE tombstone = 1")
+            return count
+
+    # CLS Distillation Memory helpers
+
+    def get_episodic_memories(
+        self,
+        user_id: str,
+        *,
+        scene_id: Optional[str] = None,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
+        limit: int = 100,
+        namespace: Optional[str] = None,
+    ) -> List[Dict[str, Any]]:
+        """Fetch episodic-type memories for a user, optionally filtered by scene/time."""
+        query = "SELECT * FROM memories WHERE user_id = ? AND memory_type = 'episodic' AND tombstone = 0"
+        params: List[Any] = [user_id]
+        if scene_id:
+            query += " AND scene_id = ?"
+            params.append(scene_id)
+        if created_after:
+            query += " AND created_at >= ?"
+            params.append(created_after)
+        if created_before:
+            query += " AND created_at <= ?"
+            params.append(created_before)
+        if namespace:
+            query += " AND namespace = ?"
+            params.append(namespace)
+        query += " ORDER BY created_at DESC LIMIT ?"
+        params.append(limit)
+        with self._get_connection() as conn:
+            rows = conn.execute(query, params).fetchall()
+            return [self._row_to_dict(row) for row in rows]
+
+    def add_distillation_provenance(
+        self,
+        semantic_memory_id: str,
+        episodic_memory_ids: List[str],
+        run_id: str,
+    ) -> None:
+        """Record which episodic memories contributed to a distilled semantic memory."""
+        with self._get_connection() as conn:
+            for ep_id in episodic_memory_ids:
+                conn.execute(
+                    """
+                    INSERT INTO distillation_provenance (id, semantic_memory_id, episodic_memory_id, distillation_run_id)
+                    VALUES (?, ?, ?, ?)
+                    """,
+                    (str(uuid.uuid4()), semantic_memory_id, ep_id, run_id),
+                )
+
+    def log_distillation_run(
+        self,
+        user_id: str,
+        episodes_sampled: int,
+        semantic_created: int,
+        semantic_deduplicated: int = 0,
+        errors: int = 0,
+    ) -> str:
+        """Log a distillation run and return the run ID."""
+        run_id = str(uuid.uuid4())
+        with self._get_connection() as conn:
+            conn.execute(
+                """
+                INSERT INTO distillation_log (id, user_id, episodes_sampled, semantic_created, semantic_deduplicated, errors)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                (run_id, user_id, episodes_sampled, semantic_created, semantic_deduplicated, errors),
+            )
+        return run_id
+
+    def get_memory_count_by_namespace(self, user_id: str) -> Dict[str, int]:
+        """Return {namespace: count} for active memories of a user."""
+        with self._get_connection() as conn:
+            rows = conn.execute(
+                """
+                SELECT COALESCE(namespace, 'default') AS ns, COUNT(*) AS cnt
+                FROM memories
+                WHERE user_id = ? AND tombstone = 0
+                GROUP BY ns
+                """,
+                (user_id,),
+            ).fetchall()
+            return {row["ns"]: row["cnt"] for row in rows}
+
+    def update_multi_trace(
+        self,
+        memory_id: str,
+        s_fast: float,
+        s_mid: float,
+        s_slow: float,
+        effective_strength: float,
+    ) -> bool:
+        """Update multi-trace columns and effective strength for a memory."""
+        return self.update_memory(memory_id, {
+            "s_fast": s_fast,
+            "s_mid": s_mid,
+            "s_slow": s_slow,
+            "strength": effective_strength,
+        })
 
     # CategoryMem methods
     def save_category(self, category_data: Dict[str, Any]) -> str:
@@ -1285,12 +1484,48 @@ class SQLiteManager:
         return True
 
     def save_all_categories(self, categories: List[Dict[str, Any]]) -> int:
-        """Save multiple categories (batch operation)."""
-        count = 0
+        """Save multiple categories in a single transaction for performance."""
+        if not categories:
+            return 0
+        rows = []
         for cat in categories:
-            self.save_category(cat)
-            count += 1
-        return count
+            cat_id = cat.get("id")
+            if not cat_id:
+                continue
+            rows.append((
+                cat_id,
+                cat.get("name", ""),
+                cat.get("description", ""),
+                cat.get("category_type", "dynamic"),
+                cat.get("parent_id"),
+                json.dumps(cat.get("children_ids", [])),
+                cat.get("memory_count", 0),
+                cat.get("total_strength", 0.0),
+                cat.get("access_count", 0),
+                cat.get("last_accessed"),
+                cat.get("created_at"),
+                json.dumps(cat.get("embedding")) if cat.get("embedding") else None,
+                json.dumps(cat.get("keywords", [])),
+                cat.get("summary"),
+                cat.get("summary_updated_at"),
+                json.dumps(cat.get("related_ids", [])),
+                cat.get("strength", 1.0),
+            ))
+        if not rows:
+            return 0
+        with self._get_connection() as conn:
+            conn.executemany(
+                """
+                INSERT OR REPLACE INTO categories (
+                    id, name, description, category_type, parent_id,
+                    children_ids, memory_count, total_strength, access_count,
+                    last_accessed, created_at, embedding, keywords,
+                    summary, summary_updated_at, related_ids, strength
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                rows,
+            )
+        return len(rows)
 
     def _category_row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
         """Convert a category row to dict."""
@@ -1807,10 +2042,14 @@ class SQLiteManager:
         set_clauses = []
         params: List[Any] = []
         for key, value in updates.items():
+            if key not in VALID_PROPOSAL_COMMIT_COLUMNS:
+                continue
             if key in {"checks", "preview", "provenance"}:
                 value = json.dumps(value)
             set_clauses.append(f"{key} = ?")
             params.append(value)
+        if not set_clauses:
+            return False
         set_clauses.append("updated_at = ?")
         params.append(_utcnow_iso())
         params.append(commit_id)
@@ -1836,6 +2075,8 @@ class SQLiteManager:
         set_clauses = ["status = ?", "updated_at = ?"]
         params: List[Any] = [str(to_status or "").upper(), _utcnow_iso()]
         for key, value in (updates or {}).items():
+            if key not in VALID_PROPOSAL_COMMIT_COLUMNS:
+                continue
             if key in {"checks", "preview", "provenance"}:
                 value = json.dumps(value)
             set_clauses.append(f"{key} = ?")
@@ -2086,12 +2327,28 @@ class SQLiteManager:
                     expires_at,
                 ),
             )
-        if existing is None:
-            self.adjust_memory_refcount(
-                memory_id,
-                strong_delta=1 if ref_type == "strong" else 0,
-                weak_delta=1 if ref_type == "weak" else 0,
-            )
+            if existing is None:
+                strong_delta = 1 if ref_type == "strong" else 0
+                weak_delta = 1 if ref_type == "weak" else 0
+                conn.execute(
+                    """
+                    INSERT INTO memory_refcounts (memory_id, strong_count, weak_count)
+                    VALUES (?, 0, 0)
+                    ON CONFLICT(memory_id) DO NOTHING
+                    """,
+                    (memory_id,),
+                )
+                conn.execute(
+                    """
+                    UPDATE memory_refcounts
+                    SET
+                        strong_count = CASE WHEN strong_count + ? < 0 THEN 0 ELSE strong_count + ? END,
+                        weak_count = CASE WHEN weak_count + ? < 0 THEN 0 ELSE weak_count + ? END,
+                        updated_at = ?
+                    WHERE memory_id = ?
+                    """,
+                    (strong_delta, strong_delta, weak_delta, weak_delta, _utcnow_iso(), memory_id),
+                )
 
     def remove_memory_subscriber(self, memory_id: str, subscriber: str, ref_type: str = "weak") -> None:
         with self._get_connection() as conn:
@@ -2102,12 +2359,20 @@ class SQLiteManager:
                 """,
                 (memory_id, subscriber, ref_type),
             )
-        if cursor.rowcount > 0:
-            self.adjust_memory_refcount(
-                memory_id,
-                strong_delta=-1 if ref_type == "strong" else 0,
-                weak_delta=-1 if ref_type == "weak" else 0,
-            )
+            if cursor.rowcount > 0:
+                strong_delta = -1 if ref_type == "strong" else 0
+                weak_delta = -1 if ref_type == "weak" else 0
+                conn.execute(
+                    """
+                    UPDATE memory_refcounts
+                    SET
+                        strong_count = CASE WHEN strong_count + ? < 0 THEN 0 ELSE strong_count + ? END,
+                        weak_count = CASE WHEN weak_count + ? < 0 THEN 0 ELSE weak_count + ? END,
+                        updated_at = ?
+                    WHERE memory_id = ?
+                    """,
+                    (strong_delta, strong_delta, weak_delta, weak_delta, _utcnow_iso(), memory_id),
+                )
 
     def list_memory_subscribers(self, memory_id: str) -> List[str]:
         with self._get_connection() as conn:
@@ -2930,6 +3195,8 @@ class SQLiteManager:
             "linked_scene_ids",
         }
         for key, value in updates.items():
+            if key not in VALID_HANDOFF_SESSION_COLUMNS:
+                continue
             if key in json_fields:
                 value = json.dumps(value)
             set_clauses.append(f"{key} = ?")
@@ -3080,6 +3347,8 @@ class SQLiteManager:
         set_clauses = []
         params: List[Any] = []
         for key, value in updates.items():
+            if key not in VALID_HANDOFF_LANE_COLUMNS:
+                continue
             if key == "current_state" and not isinstance(value, str):
                 value = json.dumps(value)
             set_clauses.append(f"{key} = ?")

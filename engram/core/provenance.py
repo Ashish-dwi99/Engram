@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, asdict
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
 
@@ -19,7 +19,7 @@ class Provenance:
     def to_dict(self) -> Dict[str, Any]:
         data = asdict(self)
         if not data["created_at"]:
-            data["created_at"] = datetime.utcnow().isoformat()
+            data["created_at"] = datetime.now(timezone.utc).isoformat()
         return data
 
 

@@ -8,7 +8,7 @@ from __future__ import annotations
 import json
 import os
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 try:
@@ -59,7 +59,10 @@ class AsyncSQLiteManager:
                     embedding TEXT,
                     related_memories TEXT DEFAULT '[]',
                     source_memories TEXT DEFAULT '[]',
-                    tombstone INTEGER DEFAULT 0
+                    tombstone INTEGER DEFAULT 0,
+                    namespace TEXT DEFAULT 'default',
+                    confidentiality_scope TEXT DEFAULT 'work',
+                    importance REAL DEFAULT 0.5
                 );
 
                 CREATE INDEX IF NOT EXISTS idx_user_layer ON memories(user_id, layer);
@@ -121,9 +124,11 @@ class AsyncSQLiteManager:
 
     @asynccontextmanager
     async def _get_connection(self):
-        """Get a database connection."""
+        """Get a database connection with WAL mode and busy timeout."""
         conn = await aiosqlite.connect(self.db_path)
         conn.row_factory = aiosqlite.Row
+        await conn.execute("PRAGMA journal_mode=WAL")
+        await conn.execute("PRAGMA busy_timeout=5000")
         try:
             yield conn
         finally:
@@ -149,7 +154,7 @@ class AsyncSQLiteManager:
         await self.initialize()
 
         async with self._get_connection() as conn:
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             await conn.execute(
                 """
                 INSERT INTO memories (
@@ -245,7 +250,7 @@ class AsyncSQLiteManager:
         await self.initialize()
 
         updates = ["updated_at = ?"]
-        params = [datetime.utcnow().isoformat()]
+        params = [datetime.now(timezone.utc).isoformat()]
 
         if content is not None:
             updates.append("memory = ?")
@@ -296,7 +301,7 @@ class AsyncSQLiteManager:
         await self.initialize()
 
         async with self._get_connection() as conn:
-            now = datetime.utcnow().isoformat()
+            now = datetime.now(timezone.utc).isoformat()
             await conn.execute(
                 """
                 UPDATE memories
@@ -437,3 +442,7 @@ class AsyncSQLiteManager:
                 result["embedding"] = None
 
         return result
+
+    async def close(self) -> None:
+        """No-op for per-call connection model. Exists for interface compatibility."""
+        pass

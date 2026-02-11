@@ -181,3 +181,35 @@ Rules:
 - discarded_as_redundant lists information dropped because it was repetitive
 - confidence reflects how well the memories merged (lower if they seem unrelated)
 """
+
+DISTILLATION_PROMPT = """You are a memory consolidation system. Extract reusable semantic knowledge from a batch of episodic memories (conversations/events).
+
+EPISODIC MEMORIES:
+{episodes}
+
+Your task is to identify durable FACTS, PREFERENCES, PATTERNS, or PROCEDURES that can be distilled from these episodic memories into long-term semantic knowledge.
+
+Respond ONLY with valid JSON in this exact format:
+{{
+    "semantic_facts": [
+        {{
+            "content": "The specific fact, preference, or pattern to remember",
+            "importance": "high|medium|low",
+            "source_episodes": ["episode_id_1", "episode_id_2"],
+            "reasoning": "Brief explanation of why this is a durable fact"
+        }}
+    ],
+    "skipped_as_temporary": ["Brief description of info that was too transient to distill"]
+}}
+
+Rules:
+- Extract ONLY durable facts supported by the episodic evidence
+- Maximum {max_facts} facts per batch
+- Each fact should be a standalone, self-contained statement
+- Use third person ("User prefers..." not "I prefer...")
+- Do NOT extract temporary/one-time information
+- Do NOT invent information not present in the episodes
+- source_episodes should reference the IDs of the episodes that support each fact
+- importance: high = likely frequently relevant, medium = useful context, low = niche
+- If nothing durable can be extracted, return empty semantic_facts array
+"""

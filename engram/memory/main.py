@@ -17,9 +17,19 @@ from engram.core.acceptance import (
 )
 from engram.core.decay import calculate_decayed_strength, should_forget, should_promote
 from engram.core.conflict import resolve_conflict
+from engram.core.distillation import ReplayDistiller
 from engram.core.echo import EchoProcessor, EchoDepth, EchoResult
+from engram.core.forgetting import HomeostaticNormalizer, InterferencePruner, RedundancyCollapser
 from engram.core.fusion import fuse_memories
+from engram.core.intent import QueryIntent, classify_intent
 from engram.core.retrieval import composite_score, tokenize, HybridSearcher
+from engram.core.traces import (
+    boost_fast_trace,
+    cascade_traces,
+    compute_effective_strength,
+    decay_traces,
+    initialize_traces,
+)
 from engram.core.category import CategoryProcessor, CategoryMatch
 from engram.core.graph import KnowledgeGraph
 from engram.core.scene import SceneProcessor
@@ -94,6 +104,7 @@ class Memory(MemoryBase):
         self.fadem_config = self.config.engram
         self.echo_config = self.config.echo
         self.scope_config = getattr(self.config, "scope", None)
+        self.distillation_config = getattr(self.config, "distillation", None)
 
         # Initialize EchoMem processor
         if self.echo_config.enable_echo:
@@ -200,6 +211,35 @@ class Memory(MemoryBase):
         # v2 Personal Memory Kernel orchestration layer.
         self.kernel = PersonalMemoryKernel(self)
 
+        # Active memory store (lazy initialized)
+        self._active_store = None
+
+    @property
+    def active(self):
+        """Lazy-initialized Active Memory store for signal bus."""
+        if self._active_store is None and self.config.active.enabled:
+            from engram.core.active_memory import ActiveMemoryStore
+            self._active_store = ActiveMemoryStore(self.config.active)
+        return self._active_store
+
+    def consolidate_active(self) -> Dict[str, Any]:
+        """Run one consolidation cycle: promote important active signals to passive memory."""
+        if not self.active:
+            return {"skipped": True, "reason": "active memory disabled"}
+        from engram.core.consolidation import ConsolidationEngine
+        engine = ConsolidationEngine(self.active, self, self.config.active)
+        return engine.run_cycle()
+
+    def close(self) -> None:
+        """Release all resources held by the Memory instance."""
+        if hasattr(self, '_active_store') and self._active_store is not None:
+            self._active_store.close()
+            self._active_store = None
+        if hasattr(self, 'vector_store') and self.vector_store is not None:
+            self.vector_store.close()
+        if hasattr(self, 'db') and self.db is not None:
+            self.db.close()
+
     def __repr__(self) -> str:
         return f"Memory(db={self.db!r}, echo={self.echo_config.enable_echo}, scenes={self.scene_config.enable_scenes})"
 
@@ -210,22 +250,22 @@ class Memory(MemoryBase):
     def add(
         self,
         messages: Union[str, List[Dict[str, str]]],
-        user_id: str = None,
-        agent_id: str = None,
-        run_id: str = None,
-        app_id: str = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        app_id: Optional[str] = None,
         metadata: Dict[str, Any] = None,
         filters: Dict[str, Any] = None,
         categories: List[str] = None,
         immutable: bool = False,
-        expiration_date: str = None,
+        expiration_date: Optional[str] = None,
         infer: bool = True,
-        prompt: str = None,
-        includes: str = None,
-        excludes: str = None,
+        prompt: Optional[str] = None,
+        includes: Optional[str] = None,
+        excludes: Optional[str] = None,
         initial_layer: str = "auto",
         initial_strength: float = 1.0,
-        echo_depth: str = None,  # EchoMem: override echo depth (shallow/medium/deep)
+        echo_depth: Optional[str] = None,  # EchoMem: override echo depth (shallow/medium/deep)
         agent_category: Optional[str] = None,
         connector_id: Optional[str] = None,
         scope: Optional[str] = None,
@@ -554,6 +594,16 @@ class Memory(MemoryBase):
         )
         namespace_value = str(mem_metadata.get("namespace", "default") or "default").strip() or "default"
 
+        # Gap 1: Classify memory type (episodic vs semantic)
+        memory_type = self._classify_memory_type(mem_metadata, role)
+
+        # Gap 4: Initialize multi-trace strength
+        s_fast_val = None
+        s_mid_val = None
+        s_slow_val = None
+        if self.distillation_config and self.distillation_config.enable_multi_trace:
+            s_fast_val, s_mid_val, s_slow_val = initialize_traces(effective_strength, is_new=True)
+
         memory_id = str(uuid.uuid4())
         now = datetime.now(timezone.utc).isoformat()
         memory_data = {
@@ -583,6 +633,10 @@ class Memory(MemoryBase):
             "importance": mem_metadata.get("importance", 0.5),
             "sensitivity": mem_metadata.get("sensitivity", "normal"),
             "namespace": namespace_value,
+            "memory_type": memory_type,
+            "s_fast": s_fast_val,
+            "s_mid": s_mid_val,
+            "s_slow": s_slow_val,
         }
 
         vectors, payloads, vector_ids = self._build_index_vectors(
@@ -600,7 +654,23 @@ class Memory(MemoryBase):
         )
 
         self.db.add_memory(memory_data)
-        self.vector_store.insert(vectors=vectors, payloads=payloads, ids=vector_ids)
+        if vectors:
+            try:
+                self.vector_store.insert(vectors=vectors, payloads=payloads, ids=vector_ids)
+            except Exception as e:
+                # Vector insert failed — roll back the DB record to prevent desync.
+                logger.error(
+                    "Vector insert failed for memory %s, rolling back DB record: %s",
+                    memory_id, e,
+                )
+                try:
+                    self.db.delete_memory(memory_id, use_tombstone=False)
+                except Exception as rollback_err:
+                    logger.critical(
+                        "CRITICAL: DB rollback also failed for memory %s — manual cleanup required: %s",
+                        memory_id, rollback_err,
+                    )
+                raise
 
         # Post-store hooks.
         if self.category_processor and mem_categories:
@@ -640,15 +710,16 @@ class Memory(MemoryBase):
             "categories": mem_categories,
             "namespace": namespace_value,
             "vector_nodes": len(vectors),
+            "memory_type": memory_type,
         }
 
     def search(
         self,
         query: str,
-        user_id: str = None,
-        agent_id: str = None,
-        run_id: str = None,
-        app_id: str = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        app_id: Optional[str] = None,
         filters: Dict[str, Any] = None,
         categories: List[str] = None,
         agent_category: Optional[str] = None,
@@ -664,6 +735,9 @@ class Memory(MemoryBase):
         use_category_boost: bool = True,  # CategoryMem: boost by category relevance
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        if not query or not query.strip():
+            return {"results": [], "context_packet": None}
+
         _, effective_filters = build_filters_and_metadata(
             user_id=user_id,
             agent_id=agent_id,
@@ -688,6 +762,15 @@ class Memory(MemoryBase):
                 for scope_value in (self._normalize_scope(s) for s in scope_filter)
                 if scope_value
             }
+
+        # Gap 5: Classify query intent for routing
+        query_intent = None
+        if (
+            self.distillation_config
+            and self.distillation_config.enable_intent_routing
+            and self.distillation_config.enable_memory_types
+        ):
+            query_intent = classify_intent(query)
 
         query_embedding = self.embedder.embed(query, memory_action="search")
         vector_results = self.vector_store.search(
@@ -751,14 +834,16 @@ class Memory(MemoryBase):
         reecho_ids: List[str] = []
         subscriber_ids: List[str] = []
 
+        # Pre-create HybridSearcher outside the loop to avoid re-allocation per result.
+        hybrid_searcher = HybridSearcher(alpha=hybrid_alpha) if keyword_search else None
+
         for memory_id in candidate_ids:
             memory = memories_bulk.get(memory_id)
             if not memory:
                 continue
 
-            # Skip expired memories
+            # Skip expired memories (cleanup happens in apply_decay, not during search)
             if self._is_expired(memory):
-                self.delete(memory["id"])
                 continue
 
             if memory.get("strength", 1.0) < min_strength:
@@ -787,8 +872,7 @@ class Memory(MemoryBase):
 
             # Hybrid search: combine semantic and keyword scores
             keyword_score = 0.0
-            if keyword_search:
-                hybrid_searcher = HybridSearcher(alpha=hybrid_alpha)
+            if hybrid_searcher:
                 scores = hybrid_searcher.score_memory(
                     query_terms=query_terms,
                     semantic_similarity=similarity,
@@ -819,6 +903,19 @@ class Memory(MemoryBase):
                 elif memory_categories & related_category_ids:
                     category_boost = self.category_config.cross_category_boost
                 combined = combined * (1 + category_boost)
+
+            # Gap 5: Intent-based retrieval routing boost
+            intent_boost = 0.0
+            mem_type = memory.get("memory_type", "semantic")
+            if query_intent and self.distillation_config:
+                dc = self.distillation_config
+                if query_intent == QueryIntent.EPISODIC and mem_type == "episodic":
+                    intent_boost = dc.episodic_boost
+                elif query_intent == QueryIntent.SEMANTIC and mem_type == "semantic":
+                    intent_boost = dc.semantic_boost
+                elif query_intent == QueryIntent.MIXED:
+                    intent_boost = dc.intersection_boost
+                combined = combined * (1 + intent_boost)
 
             # KnowledgeGraph: Boost for memories sharing entities with query terms
             graph_boost = 0.0
@@ -885,6 +982,9 @@ class Memory(MemoryBase):
                     "echo_boost": echo_boost,
                     "category_boost": category_boost,
                     "graph_boost": graph_boost,
+                    "intent_boost": intent_boost,
+                    "memory_type": mem_type,
+                    "query_intent": query_intent.value if query_intent else None,
                 }
             )
 
@@ -967,19 +1067,25 @@ class Memory(MemoryBase):
             self.db.increment_access(memory_id)
         return memory
 
+    # Hard cap to prevent unbounded result sets even if callers pass a huge limit.
+    _GET_ALL_MAX_LIMIT = 10_000
+
     def get_all(
         self,
-        user_id: str = None,
-        agent_id: str = None,
-        run_id: str = None,
-        app_id: str = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        app_id: Optional[str] = None,
         filters: Dict[str, Any] = None,
         categories: List[str] = None,
         limit: int = 100,
-        layer: str = None,
+        layer: Optional[str] = None,
         min_strength: float = 0.0,
         **kwargs: Any,
     ) -> Dict[str, Any]:
+        # Clamp limit to a sensible maximum to avoid unbounded result sets.
+        limit = max(1, min(limit, self._GET_ALL_MAX_LIMIT))
+
         _, effective_filters = build_filters_and_metadata(
             user_id=user_id,
             agent_id=agent_id,
@@ -996,6 +1102,7 @@ class Memory(MemoryBase):
             app_id=app_id,
             layer=layer,
             min_strength=min_strength,
+            limit=limit,
         )
 
         if categories:
@@ -1077,7 +1184,14 @@ class Memory(MemoryBase):
                     run_id=memory.get("run_id"),
                     app_id=memory.get("app_id"),
                 )
-                self.vector_store.insert(vectors=vectors, payloads=payloads, ids=vector_ids)
+                try:
+                    self.vector_store.insert(vectors=vectors, payloads=payloads, ids=vector_ids)
+                except Exception as e:
+                    logger.error(
+                        "Vector re-insert failed during update for memory %s: %s. "
+                        "DB was updated but vector index is stale — will be rebuilt on next update.",
+                        memory_id, e,
+                    )
         else:
             success = self.db.update_memory(
                 memory_id,
@@ -1086,22 +1200,31 @@ class Memory(MemoryBase):
             if success:
                 payload_updates = dict(metadata)
                 payload_updates["categories"] = categories
-                self._update_vectors_for_memory(memory_id, payload_updates)
+                try:
+                    self._update_vectors_for_memory(memory_id, payload_updates)
+                except Exception as e:
+                    logger.error(
+                        "Vector payload update failed for memory %s: %s. "
+                        "DB is authoritative — vector metadata may be stale.",
+                        memory_id, e,
+                    )
 
         return {"id": memory_id, "memory": content, "event": "UPDATE" if success else "ERROR"}
 
     def delete(self, memory_id: str) -> Dict[str, Any]:
+        logger.info("Deleting memory %s (tombstone=%s)", memory_id, self.fadem_config.use_tombstone_deletion)
         self.db.delete_memory(memory_id, use_tombstone=self.fadem_config.use_tombstone_deletion)
         self._delete_vectors_for_memory(memory_id)
         return {"id": memory_id, "deleted": True}
 
     def delete_all(
         self,
-        user_id: str = None,
-        agent_id: str = None,
-        run_id: str = None,
-        app_id: str = None,
+        user_id: Optional[str] = None,
+        agent_id: Optional[str] = None,
+        run_id: Optional[str] = None,
+        app_id: Optional[str] = None,
         filters: Dict[str, Any] = None,
+        dry_run: bool = False,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         if not any([user_id, agent_id, run_id, app_id, filters]):
@@ -1113,6 +1236,13 @@ class Memory(MemoryBase):
         if filters:
             memories = [m for m in memories if matches_filters({**m, **m.get("metadata", {})}, filters)]
 
+        if dry_run:
+            return {"deleted_count": 0, "would_delete": len(memories), "dry_run": True}
+
+        logger.warning(
+            "delete_all: deleting %d memories (user_id=%s, agent_id=%s, filters=%s)",
+            len(memories), user_id, agent_id, filters,
+        )
         count = 0
         for memory in memories:
             self.delete(memory["id"])
@@ -1123,7 +1253,9 @@ class Memory(MemoryBase):
         return self.db.get_history(memory_id)
 
     def reset(self) -> None:
+        """Delete ALL memories including tombstoned. This is IRREVERSIBLE."""
         memories = self.db.get_all_memories(include_tombstoned=True)
+        logger.warning("reset: permanently deleting ALL %d memories", len(memories))
         for mem in memories:
             self.delete(mem["id"])
         if hasattr(self.vector_store, "reset"):
@@ -1165,13 +1297,31 @@ class Memory(MemoryBase):
                     metrics.record_ref_protected_skip(1)
                     continue
 
-            new_strength = calculate_decayed_strength(
-                current_strength=memory.get("strength", 1.0),
-                last_accessed=memory.get("last_accessed", datetime.now(timezone.utc).isoformat()),
-                access_count=memory.get("access_count", 0),
-                layer=memory.get("layer", "sml"),
-                config=self.fadem_config,
+            # Gap 4: Multi-trace decay (if enabled and traces are initialized)
+            use_multi_trace = (
+                self.distillation_config
+                and self.distillation_config.enable_multi_trace
+                and memory.get("s_fast") is not None
             )
+
+            if use_multi_trace:
+                s_f, s_m, s_s = decay_traces(
+                    s_fast=float(memory.get("s_fast", 0.0)),
+                    s_mid=float(memory.get("s_mid", 0.0)),
+                    s_slow=float(memory.get("s_slow", 0.0)),
+                    last_accessed=memory.get("last_accessed", datetime.now(timezone.utc).isoformat()),
+                    access_count=memory.get("access_count", 0),
+                    config=self.distillation_config,
+                )
+                new_strength = compute_effective_strength(s_f, s_m, s_s, self.distillation_config)
+            else:
+                new_strength = calculate_decayed_strength(
+                    current_strength=memory.get("strength", 1.0),
+                    last_accessed=memory.get("last_accessed", datetime.now(timezone.utc).isoformat()),
+                    access_count=memory.get("access_count", 0),
+                    layer=memory.get("layer", "sml"),
+                    config=self.fadem_config,
+                )
 
             if ref_aware and int(ref_state.get("weak", 0)) > 0:
                 weak = min(int(ref_state.get("weak", 0)), 10)
@@ -1190,7 +1340,10 @@ class Memory(MemoryBase):
                 continue
 
             if new_strength != memory.get("strength"):
-                self.db.update_memory(memory["id"], {"strength": new_strength})
+                if use_multi_trace:
+                    self.db.update_multi_trace(memory["id"], s_f, s_m, s_s, new_strength)
+                else:
+                    self.db.update_memory(memory["id"], {"strength": new_strength})
                 self.db.log_event(memory["id"], "DECAY", old_strength=memory.get("strength"), new_strength=new_strength)
                 decayed += 1
 
@@ -1207,15 +1360,55 @@ class Memory(MemoryBase):
         if self.fadem_config.use_tombstone_deletion:
             self.db.purge_tombstoned()
 
+        # Gap 3: Advanced forgetting mechanisms
+        interference_stats = {"checked": 0, "demoted": 0}
+        redundancy_stats = {"groups_fused": 0, "memories_fused": 0}
+        homeostasis_stats = {"namespaces_over_budget": 0, "pressured": 0, "forgotten": 0}
+
+        if self.distillation_config:
+            user_id = scope.get("user_id") if scope else None
+
+            if self.distillation_config.enable_interference_pruning:
+                pruner = InterferencePruner(
+                    db=self.db,
+                    config=self.distillation_config,
+                    fadem_config=self.fadem_config,
+                    resolve_conflict_fn=resolve_conflict,
+                    search_fn=self.vector_store.search,
+                    llm=self.llm,
+                )
+                interference_stats = pruner.run(memories, user_id=user_id)
+
+            if self.distillation_config.enable_redundancy_collapse:
+                collapser = RedundancyCollapser(
+                    db=self.db,
+                    config=self.distillation_config,
+                    fuse_fn=self.fuse_memories,
+                    search_fn=self.vector_store.search,
+                )
+                redundancy_stats = collapser.run(memories, user_id=user_id)
+
+            if self.distillation_config.enable_homeostasis and user_id:
+                normalizer = HomeostaticNormalizer(
+                    db=self.db,
+                    config=self.distillation_config,
+                    fadem_config=self.fadem_config,
+                    delete_fn=self.delete,
+                )
+                homeostasis_stats = normalizer.run(user_id)
+
         self.db.log_decay(decayed, forgotten, promoted)
         return {
             "decayed": decayed,
             "forgotten": forgotten,
             "promoted": promoted,
             "stale_refs_removed": stale_refs_removed,
+            "interference": interference_stats,
+            "redundancy": redundancy_stats,
+            "homeostasis": homeostasis_stats,
         }
 
-    def fuse_memories(self, memory_ids: List[str], user_id: str = None) -> Dict[str, Any]:
+    def fuse_memories(self, memory_ids: List[str], user_id: Optional[str] = None) -> Dict[str, Any]:
         memories = [self.db.get_memory(mid) for mid in memory_ids]
         memories = [m for m in memories if m]
         if len(memories) < 2:
@@ -1239,7 +1432,7 @@ class Memory(MemoryBase):
         fused_id = result.get("results", [{}])[0].get("id") if result.get("results") else None
         return {"fused_id": fused_id, "source_ids": memory_ids, "fused_memory": fused.content}
 
-    def get_stats(self, user_id: str = None, agent_id: str = None) -> Dict[str, Any]:
+    def get_stats(self, user_id: Optional[str] = None, agent_id: Optional[str] = None) -> Dict[str, Any]:
         memories = self.db.get_all_memories(user_id=user_id, agent_id=agent_id)
         sml_count = sum(1 for m in memories if m.get("layer") == "sml")
         lml_count = sum(1 for m in memories if m.get("layer") == "lml")
@@ -1594,17 +1787,40 @@ class Memory(MemoryBase):
                 extracted = [m for m in extracted if excludes.lower() not in m.get("content", "").lower()]
             return extracted
         except Exception as exc:
-            logger.warning("Failed to parse extraction response: %s", exc)
-            # Fallback: add last user message
-            last_user = next((m for m in reversed(messages) if m.get("role") == "user"), None)
-            if last_user:
-                return [{"content": last_user.get("content", "") }]
+            logger.warning("Memory extraction failed (LLM or JSON error): %s", exc)
             return []
 
     def _should_use_agent_memory_extraction(self, messages: List[Dict[str, Any]], metadata: Dict[str, Any]) -> bool:
         has_agent_id = metadata.get("agent_id") is not None
         has_assistant_messages = any(msg.get("role") == "assistant" for msg in messages)
         return has_agent_id and has_assistant_messages
+
+    def _classify_memory_type(self, metadata: Dict[str, Any], role: str) -> str:
+        """Classify a memory as 'episodic' or 'semantic' (Gap 1).
+
+        When enable_memory_types is False, everything stays 'semantic' (backward compat).
+        """
+        if not self.distillation_config or not self.distillation_config.enable_memory_types:
+            return self.distillation_config.default_memory_type if self.distillation_config else "semantic"
+
+        # Explicit override from metadata
+        explicit = metadata.get("memory_type")
+        if explicit in ("episodic", "semantic"):
+            return explicit
+
+        # Distilled content is always semantic
+        if metadata.get("is_distilled"):
+            return "semantic"
+
+        # Conversation messages (user/assistant) are episodic
+        if role in ("user", "assistant"):
+            return "episodic"
+
+        # Active memory signals are semantic
+        if metadata.get("source_type") == "active_signal":
+            return "semantic"
+
+        return "semantic"
 
     def _select_primary_text(self, content: str, echo_result: Optional[EchoResult]) -> str:
         if self.echo_config.use_question_embedding and echo_result and echo_result.question_form:
@@ -1830,26 +2046,43 @@ class Memory(MemoryBase):
         return vectors, payloads, vector_ids
 
     def _delete_vectors_for_memory(self, memory_id: str) -> None:
-        vectors = self.vector_store.list(filters={"memory_id": memory_id})
-        if not vectors:
-            self.vector_store.delete(memory_id)
-            return
-        for vec in vectors:
-            self.vector_store.delete(vec.id)
+        try:
+            vectors = self.vector_store.list(filters={"memory_id": memory_id})
+            if not vectors:
+                self.vector_store.delete(memory_id)
+                return
+            for vec in vectors:
+                self.vector_store.delete(vec.id)
+        except Exception as e:
+            logger.error(
+                "Failed to delete vectors for memory %s: %s. "
+                "Orphaned vector entries may exist.",
+                memory_id, e,
+            )
 
     def _update_vectors_for_memory(self, memory_id: str, payload_updates: Dict[str, Any]) -> None:
-        vectors = self.vector_store.list(filters={"memory_id": memory_id})
+        try:
+            vectors = self.vector_store.list(filters={"memory_id": memory_id})
+        except Exception as e:
+            logger.error("Failed to list vectors for memory %s: %s", memory_id, e)
+            return
         if not vectors:
-            existing = self.vector_store.get(memory_id)
-            if existing:
-                payload = existing.payload or {}
-                payload.update(payload_updates)
-                self.vector_store.update(memory_id, payload=payload)
+            try:
+                existing = self.vector_store.get(memory_id)
+                if existing:
+                    payload = existing.payload or {}
+                    payload.update(payload_updates)
+                    self.vector_store.update(memory_id, payload=payload)
+            except Exception as e:
+                logger.error("Failed to update vector payload for memory %s: %s", memory_id, e)
             return
         for vec in vectors:
             payload = vec.payload or {}
             payload.update(payload_updates)
-            self.vector_store.update(vec.id, payload=payload)
+            try:
+                self.vector_store.update(vec.id, payload=payload)
+            except Exception as e:
+                logger.error("Failed to update vector %s for memory %s: %s", vec.id, memory_id, e)
 
     def _nearest_memory(self, embedding: List[float], filters: Dict[str, Any]) -> tuple[Optional[Dict[str, Any]], float]:
         results = self.vector_store.search(query=None, vectors=embedding, limit=1, filters=filters)

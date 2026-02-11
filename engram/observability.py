@@ -24,7 +24,7 @@ import time
 from collections import defaultdict
 from contextlib import contextmanager
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Callable
 import threading
 
@@ -60,7 +60,7 @@ class StructuredLogger:
             "structured_data": {
                 **self._context,
                 **kwargs,
-                "timestamp": datetime.utcnow().isoformat(),
+                "timestamp": datetime.now(timezone.utc).isoformat(),
             }
         }
         self._logger.log(level, message, extra=extra)
@@ -123,7 +123,7 @@ class OperationMetrics:
         self.max_latency_ms = max(self.max_latency_ms, latency_ms)
         if error:
             self.errors += 1
-        self.last_operation = datetime.utcnow().isoformat()
+        self.last_operation = datetime.now(timezone.utc).isoformat()
 
     @property
     def avg_latency_ms(self) -> float:
@@ -183,7 +183,7 @@ class MetricsCollector:
         self._lock = threading.Lock()
         self._operations: Dict[str, OperationMetrics] = defaultdict(OperationMetrics)
         self._memory = MemoryMetrics()
-        self._start_time = datetime.utcnow()
+        self._start_time = datetime.now(timezone.utc)
         self._custom_gauges: Dict[str, float] = {}
 
     def record_operation(
@@ -266,7 +266,7 @@ class MetricsCollector:
     def get_summary(self) -> Dict[str, Any]:
         """Get a summary of all metrics."""
         with self._lock:
-            uptime = (datetime.utcnow() - self._start_time).total_seconds()
+            uptime = (datetime.now(timezone.utc) - self._start_time).total_seconds()
             return {
                 "uptime_seconds": round(uptime, 2),
                 "operations": {

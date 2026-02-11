@@ -12,7 +12,7 @@
 
 <p align="center">
   Hit a rate limit in Claude Code? Open Codex — it already knows what you were doing.<br>
-  One memory kernel. Shared across every agent. Bio-inspired forgetting. Staged writes. Episodic recall.
+  One memory kernel. Shared across every agent. Active + passive memory. Bio-inspired forgetting. Real-time multi-agent coordination.
 </p>
 
 <p align="center">
@@ -51,11 +51,16 @@ But Engram isn't just a handoff bus. It solves four fundamental problems with ho
 | Problem | Other Memory Layers | **Engram** |
 |:--------|:--------------------|:-----------|
 | **Switching agents = cold start** | Manual copy/paste context | **Handoff bus — session digests, auto-resume** |
+| **No real-time coordination** | Polling or nothing | **Active Memory signal bus — agents see each other's state instantly** |
 | **Nobody forgets** | Store everything forever | **Ebbinghaus decay curve, ~45% less storage** |
 | **Agents write with no oversight** | Store directly | **Staging + verification + trust scoring** |
 | **No episodic memory** | Vector search only | **CAST scenes (time/place/topic)** |
+| **No consolidation** | Store everything as-is | **CLS Distillation — replay-driven fact extraction** |
+| **Single decay rate** | One exponential curve | **Multi-trace Benna-Fusi model (fast/mid/slow)** |
+| **No intent routing** | Same search for all queries | **Episodic vs semantic query classification** |
 | Multi-modal encoding | Single embedding | **5 retrieval paths (EchoMem)** |
 | Cross-agent memory sharing | Per-agent silos | **Scoped retrieval with all-but-mask privacy** |
+| Concurrent multi-agent access | Single-process locks | **sqlite-vec WAL mode — multiple agents, one DB** |
 | Reference-aware decay | No | **If other agents use it, don't delete it** |
 | Knowledge graph | Sometimes | **Entity extraction + linking** |
 | MCP + REST | One or the other | **Both, plug-and-play** |
@@ -79,11 +84,17 @@ Restart your agent. Done — it now has persistent memory across sessions.
 # Default runtime (Gemini + local Qdrant + MemoryClient deps)
 pip install engram-memory
 
-# Full stack extras (MCP server + REST API + async + all providers)
+# Full stack extras (MCP server + REST API + async + sqlite-vec + all providers)
 pip install "engram-memory[all]"
+
+# sqlite-vec for concurrent multi-agent vector search (no server needed)
+pip install "engram-memory[sqlite_vec]"
 
 # OpenAI provider add-on
 pip install "engram-memory[openai]"
+
+# NVIDIA provider add-on (Llama 3.1, nv-embed-v1, etc.)
+pip install "engram-memory[nvidia]"
 
 # Ollama provider add-on
 pip install "engram-memory[ollama]"
@@ -130,12 +141,18 @@ docker compose up -d               # API at http://localhost:8100
 
 ## Architecture
 
-Engram is a **Personal Memory Kernel** — not just a vector store with an API. It has opinions about how memory should work:
+Engram is a **Personal Memory Kernel** — not just a vector store with an API. It models memory the way brains do, with two distinct systems:
+
+- **Active Memory (conscious):** A real-time signal bus where agents post ephemeral state and events. Every MCP response includes the latest active signals — like how your conscious mind always knows "what's happening right now." Signals auto-expire by TTL tier. Important ones get consolidated into passive memory.
+- **Passive Memory (subconscious):** The long-term store — FadeMem decay, EchoMem encoding, CategoryMem organization, CAST scenes. Things the agent "knows" but isn't actively thinking about.
+
+Engram has five opinions about how memory should work:
 
 1. **Switching agents shouldn't mean starting over.** When an agent pauses — rate limit, crash, tool switch — it saves a session digest. The next agent loads it and continues. Zero re-explanation.
-2. **Memory has a lifecycle.** New memories start in short-term (SML), get promoted to long-term (LML) through repeated access, and fade away through Ebbinghaus decay if unused.
-3. **Agents are untrusted writers.** Every write is a proposal that lands in staging. Trusted agents can auto-merge; untrusted ones wait for approval.
-4. **Scoping is mandatory.** Every memory is scoped by user. Agents see only what they're allowed to — everything else gets the "all but mask" treatment (structure visible, details redacted).
+2. **Agents need shared real-time state.** Active Memory lets agents broadcast what they're doing right now — no polling, no coordination protocol. Agent A posts "editing auth.py"; Agent B sees it instantly.
+3. **Memory has a lifecycle.** New memories start in short-term (SML), get promoted to long-term (LML) through repeated access, and fade away through Ebbinghaus decay if unused. Sleep cycles distill episodic conversations into durable semantic facts (CLS consolidation), cascade strength traces from fast to slow, and prune redundant or contradictory memories.
+4. **Agents are untrusted writers.** Every write is a proposal that lands in staging. Trusted agents can auto-merge; untrusted ones wait for approval.
+5. **Scoping is mandatory.** Every memory is scoped by user. Agents see only what they're allowed to — everything else gets the "all but mask" treatment (structure visible, details redacted).
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
@@ -151,54 +168,83 @@ Engram is a **Personal Memory Kernel** — not just a vector store with an API. 
         │  Server  │           │   API    │
         └────┬─────┘           └────┬─────┘
              └───────────┬──────────┘
-                         ▼
-        ┌────────────────────────────────────┐
-        │         Policy Gateway             │
-        │   Scopes · Masking · Quotas ·      │
-        │   Capability Tokens · Trust Score  │
-        └────────────────┬───────────────────┘
                          │
-              ┌──────────┴──────────┐
-              ▼                     ▼
-   ┌──────────────────┐  ┌──────────────────┐
-   │  Retrieval Engine │  │ Ingestion Pipeline│
-   │  ┌─────────────┐ │  │                  │
-   │  │Semantic     │ │  │  Text → Views    │
-   │  │(hybrid+graph│ │  │  Views → Scenes  │
-   │  │+categories) │ │  │  Scenes → LML    │
-   │  ├─────────────┤ │  │                  │
-   │  │Episodic     │ │  └────────┬─────────┘
-   │  │(CAST scenes)│ │           │
-   │  └─────────────┘ │           ▼
-   │                  │  ┌──────────────────┐
-   │  Intersection    │  │Write Verification│
-   │  Promotion:      │  │                  │
-   │  match in both → │  │ Invariant checks │
-   │  boost score     │  │ Conflict → stash │
-   └──────────────────┘  │ Trust scoring    │
-                         └────────┬─────────┘
-                                  │
-              ┌───────────────────┼───────────────────┐
-              ▼                   ▼                   ▼
-   ┌──────────────────┐  ┌──────────────┐  ┌──────────────────┐
-   │  Staging (SML)   │  │ Long-Term    │  │    Indexes       │
-   │  Proposals+Diffs │  │ Store (LML)  │  │ Vector + Graph   │
-   │  Conflict Stash  │  │ Canonical    │  │ + Episodic       │
-   └──────────────────┘  └──────────────┘  └──────────────────┘
-              │                   │                   │
-              └───────────────────┼───────────────────┘
-                                  ▼
-                       ┌──────────────────┐
-                       │   FadeMem GC     │
-                       │  Ref-aware decay │
-                       │  If other agents │
-                       │  use it → keep   │
-                       └──────────────────┘
+        ┌────────────────┴────────────────────┐
+        │         Policy Gateway              │
+        │   Scopes · Masking · Quotas ·       │
+        │   Capability Tokens · Trust Score   │
+        └────────────────┬────────────────────┘
+                         │
+     ┌───────────────────┼───────────────────┐
+     ▼                   ▼                   ▼
+┌──────────┐  ┌──────────────────┐  ┌──────────────────┐
+│  ACTIVE  │  │  Retrieval Engine │  │ Ingestion Pipeline│
+│  MEMORY  │  │  ┌─────────────┐ │  │                  │
+│          │  │  │Semantic     │ │  │  Text → Views    │
+│ Signal   │  │  │(hybrid+graph│ │  │  Views → Scenes  │
+│ Bus      │  │  │+categories) │ │  │  Scenes → LML    │
+│          │  │  ├─────────────┤ │  │                  │
+│ state    │  │  │Episodic     │ │  └────────┬─────────┘
+│ event    │  │  │(CAST scenes)│ │           │
+│ directive│  │  └─────────────┘ │           ▼
+│          │  │  Intersection    │  ┌──────────────────┐
+│ Auto-    │  │  Promotion:      │  │Write Verification│
+│ injected │  │  match in both → │  │ Invariant checks │
+│ in every │  │  boost score     │  │ Conflict → stash │
+│ response │  └──────────────────┘  │ Trust scoring    │
+│          │                        └────────┬─────────┘
+│  ┌─────┐ │                                 │
+│  │ TTL │ │       ┌─────────────────────────┼──────────────┐
+│  └──┬──┘ │       ▼                         ▼              ▼
+│     │    │  ┌──────────────┐  ┌──────────────┐  ┌──────────────┐
+│     ▼    │  │ Staging (SML)│  │ Long-Term    │  │   Indexes    │
+│ Consoli- │  │ Proposals    │  │ Store (LML)  │  │ Vector+Graph │
+│ dation   │  │ Conflict     │  │ Canonical    │  │ + Episodic   │
+│ Engine ──┼──│ Stash        │  │              │  │              │
+│          │  └──────────────┘  └──────────────┘  └──────────────┘
+└──────────┘          │                 │                  │
+                      └─────────────────┼──────────────────┘
+                                        ▼
+                             ┌──────────────────┐
+                             │   FadeMem GC     │
+                             │  Ref-aware decay │
+                             │  If other agents │
+                             │  use it → keep   │
+                             └──────────────────┘
 ```
 
 ### The Memory Stack
 
-Engram combines five systems, each handling a different aspect of how memory should work:
+Engram combines multiple systems, each handling a different aspect of how memory should work:
+
+#### Active Memory — Real-Time Signal Bus
+
+The "conscious mind" of the system. A shared SQLite bus (WAL mode, concurrent-safe) where agents post ephemeral signals that other agents see immediately. Every MCP tool response auto-injects the latest signals — agents always know what's happening without polling.
+
+Three signal types, four TTL tiers:
+
+```
+Signal Types:                    TTL Tiers:
+  state     → upserts by key      noise     → 30 minutes
+  event     → always new row       notable   → 2 hours
+  directive → permanent rule       critical  → 24 hours
+                                   directive → permanent
+```
+
+```
+Agent A: signal_write(key="editing", value="auth.py", signal_type="state")
+Agent B: signal_write(key="build_status", value="failing", signal_type="event")
+User:    signal_write(key="use_typescript", value="always", signal_type="directive")
+
+Any tool call → response includes:
+  "_active": [
+    {"key": "use_typescript", "ttl_tier": "directive", ...},
+    {"key": "build_status",   "ttl_tier": "notable",   ...},
+    {"key": "editing",        "ttl_tier": "notable",   ...}
+  ]
+```
+
+**Consolidation Engine:** Important active signals get promoted to passive memory — like how sleep consolidates short-term into long-term memory. Directives become immutable LML memories. Critical and high-read signals get promoted to SML.
 
 #### FadeMem — Decay & Consolidation
 
@@ -247,6 +293,48 @@ Scene: "Engram v2 architecture session"
   Synopsis:   "Designed staged writes and scoped retrieval..."
   Views:      [view_1, view_2, view_3]
   Memories:   [mem_1, mem_2]  ← semantic facts extracted
+```
+
+#### CLS Distillation Memory — Bio-Inspired Consolidation (v1.4)
+
+Inspired by Complementary Learning Systems (CLS) theory — how the hippocampus and neocortex work together in the brain. Engram v1.4 adds five mechanisms that make memory smarter over time:
+
+**1. Episodic/Semantic Memory Types**
+Conversations are stored as `episodic` memories. During sleep cycles, a replay-driven distiller extracts durable facts into `semantic` memories — just like how your brain consolidates experiences into knowledge overnight.
+
+**2. Replay-Driven Distillation**
+The `ReplayDistiller` samples recent episodic memories, groups them by scene/time, and uses the LLM to extract reusable semantic facts. Every distilled fact links back to its source episodes (provenance tracking).
+
+**3. Multi-Mechanism Forgetting**
+Beyond simple exponential decay, Engram now has three advanced forgetting mechanisms:
+- **Interference Pruning** — contradictory memories are detected and the weaker one is demoted
+- **Redundancy Collapse** — near-duplicate memories are auto-fused
+- **Homeostatic Normalization** — memory budgets per namespace prevent unbounded growth
+
+**4. Multi-Timescale Strength Traces (Benna-Fusi Model)**
+Each memory has three strength traces instead of one scalar:
+```
+s_fast  (decay: 0.20/day) — recent access, volatile
+s_mid   (decay: 0.05/day) — medium-term consolidation
+s_slow  (decay: 0.005/day) — durable long-term knowledge
+```
+New memories start in `s_fast`. Sleep cycles cascade strength: `fast → mid → slow`. Important facts become nearly permanent.
+
+**5. Intent-Aware Retrieval Routing**
+Queries are classified as episodic ("when did we discuss..."), semantic ("what is the deployment process?"), or mixed. Matching memory types get a retrieval boost — the right type of answer for the right type of question.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    Sleep Cycle (v1.4)                         │
+│                                                              │
+│  1. Standard FadeMem decay (SML/LML)                         │
+│  2. Multi-trace decay (fast/mid/slow independently)          │
+│  3. Interference pruning (contradict → demote weaker)        │
+│  4. Redundancy collapse (near-dupes → fuse)                  │
+│  5. Homeostatic normalization (budget enforcement)            │
+│  6. Replay distillation (episodic → semantic facts)          │
+│  7. Trace cascade (fast → mid → slow consolidation)          │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 #### Handoff Bus — Cross-Agent Continuity
@@ -409,6 +497,11 @@ Once configured, your agent has access to these tools:
 
 | Tool | Description |
 |:-----|:------------|
+| **Active Memory** | |
+| `signal_write` | Post a signal to the bus (state/event/directive with TTL tiers) |
+| `signal_read` | Read active signals, ordered by priority |
+| `signal_clear` | Clear signals by key, agent, scope, or type |
+| **Passive Memory** | |
 | `add_memory` | Store a new memory (lands in staging by default) |
 | `search_memory` | Semantic + keyword + episodic search |
 | `get_all_memories` | List all stored memories for a user |
@@ -423,12 +516,12 @@ Once configured, your agent has access to these tools:
 | `list_pending_commits` | Inspect staged write queue |
 | `resolve_conflict` | Resolve invariant conflicts (accept proposed or keep existing) |
 | `search_scenes` / `get_scene` | Episodic CAST scene retrieval with masking policy |
+| **Handoff** | |
 | `save_session_digest` | Save handoff context when pausing or switching agents |
 | `get_last_session` | Load session context from the last active agent |
 | `list_sessions` | Browse handoff history across agents |
 
-Auto-lifecycle behavior is server-driven: when `auto_session_bus` is enabled,
-Engram writes handoff checkpoints without explicit user prompts.
+Every tool response auto-includes an `_active` field with the latest signals from the Active Memory bus. Auto-lifecycle behavior is server-driven: when `auto_session_bus` is enabled, Engram writes handoff checkpoints without explicit user prompts.
 
 ---
 
@@ -519,7 +612,7 @@ curl "http://localhost:8100/v1/handoff/sessions?user_id=u123&repo=/repo&limit=20
 
 - `hosted_backend_unavailable`: verify `ENGRAM_API_URL` and network reachability.
 - `missing_or_expired_token` / `missing_capability`: ensure the caller has a valid session token with `read_handoff` or `write_handoff`.
-- `Storage folder ... qdrant is already accessed`: local Qdrant file mode is single-process; use hosted API mode or a shared Qdrant server for concurrent agents.
+- `Storage folder ... qdrant is already accessed`: local Qdrant file mode is single-process. Fix: switch to `sqlite_vec` provider (`pip install "engram-memory[sqlite_vec]"`) which uses WAL mode for concurrent access, or use hosted API mode / a shared Qdrant server.
 
 ### Python SDK
 
@@ -569,6 +662,12 @@ memory.demote(memory_id)                 # LML → SML
 memory.fuse(memory_ids)                  # Combine related memories
 memory.decay(user_id=None)               # Apply forgetting
 memory.history(memory_id)                # Access history
+
+# Active Memory (signal bus)
+memory.active.write_signal(key="editing", value="auth.py", signal_type="state")
+memory.active.read_signals(user_id="default")
+memory.active.clear_signals(key="editing")
+memory.consolidate_active()              # Promote important signals → passive memory
 
 # Knowledge graph
 memory.get_related_memories(memory_id)   # Graph traversal
@@ -632,10 +731,16 @@ export ENGRAM_V2_AUTO_MERGE_TRUST_THRESHOLD="0.85"    # Trust threshold for auto
 **Python config:**
 
 ```python
-from engram.configs.base import MemoryConfig, FadeMemConfig, EchoMemConfig, CategoryMemConfig
+from engram.configs.base import MemoryConfig, VectorStoreConfig, FadeMemConfig, EchoMemConfig, CategoryMemConfig
+from engram.configs.active import ActiveMemoryConfig
 
 config = MemoryConfig(
-    fadem=FadeMemConfig(
+    # Use sqlite-vec for concurrent multi-agent access (no server needed)
+    vector_store=VectorStoreConfig(
+        provider="sqlite_vec",
+        config={"path": "~/.engram/vectors.db"},
+    ),
+    engram=FadeMemConfig(
         enable_forgetting=True,
         sml_decay_rate=0.15,
         lml_decay_rate=0.02,
@@ -653,6 +758,13 @@ config = MemoryConfig(
         enable_category_decay=True,
         max_category_depth=3,
     ),
+    # Active Memory signal bus
+    active=ActiveMemoryConfig(
+        enabled=True,
+        db_path="~/.engram/active.db",
+        default_ttl_tier="notable",
+        consolidation_enabled=True,
+    ),
 )
 ```
 
@@ -663,7 +775,7 @@ config = MemoryConfig(
 Engram is designed for agent orchestrators. Every memory is scoped by `user_id` and optionally `agent_id`:
 
 ```python
-# Research agent stores knowledge
+# Research agent stores knowledge (passive memory)
 memory.add("OAuth 2.0 with JWT tokens",
            user_id="project_123", agent_id="researcher")
 
@@ -674,6 +786,31 @@ results = memory.search("authentication", user_id="project_123")
 # Review agent adds findings
 memory.add("Security review passed",
            user_id="project_123", agent_id="reviewer")
+```
+
+**Real-time coordination with Active Memory:**
+
+```python
+# Agent A broadcasts what it's working on
+memory.active.write_signal(
+    key="editing_file", value="src/auth.py",
+    signal_type="state", source_agent_id="agent-A"
+)
+
+# Agent B posts a build event
+memory.active.write_signal(
+    key="build", value="tests failing: 3 errors in auth module",
+    signal_type="event", ttl_tier="critical"
+)
+
+# User sets a permanent directive
+memory.active.write_signal(
+    key="style_rule", value="Always use TypeScript for new files",
+    signal_type="directive"  # Never expires, auto-promoted to passive memory
+)
+
+# Any agent reads the bus — or it's auto-injected into every MCP response
+signals = memory.active.read_signals(user_id="default")
 ```
 
 **Agent trust scoring** determines write permissions:
@@ -696,7 +833,7 @@ Engram is based on:
 | Multi-hop Reasoning | +12% accuracy |
 | Retrieval Precision | +8% on LTI-Bench |
 
-Biological inspirations: Ebbinghaus Forgetting Curve → exponential decay, Spaced Repetition → access boosts strength, Sleep Consolidation → SML → LML promotion, Production Effect → echo encoding, Elaborative Encoding → deeper processing = stronger memory.
+Biological inspirations: Ebbinghaus Forgetting Curve → exponential decay, Spaced Repetition → access boosts strength, Sleep Consolidation → SML → LML promotion + CLS replay distillation, Benna-Fusi Model → multi-timescale strength traces (fast/mid/slow), Complementary Learning Systems → episodic-to-semantic consolidation, Working Memory → Active Memory signal bus, Conscious/Subconscious Split → Active vs Passive memory, Production Effect → echo encoding, Elaborative Encoding → deeper processing = stronger memory.
 
 ---
 
@@ -883,7 +1020,7 @@ MIT License — see [LICENSE](LICENSE) for details.
 ---
 
 <p align="center">
-  <b>Switch agents without losing context. Stop re-explaining yourself.</b>
+  <b>One memory. Every agent. Real-time coordination. Zero cold starts.</b>
   <br><br>
   <a href="https://github.com/Ashish-dwi99/Engram">GitHub</a> &middot;
   <a href="https://github.com/Ashish-dwi99/Engram/issues">Issues</a> &middot;

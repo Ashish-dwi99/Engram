@@ -85,9 +85,16 @@ app = FastAPI(
     redoc_url="/redoc",
 )
 
+_cors_origins_raw = os.environ.get("ENGRAM_CORS_ORIGINS", "")
+_cors_origins = (
+    [o.strip() for o in _cors_origins_raw.split(",") if o.strip()]
+    if _cors_origins_raw
+    else ["http://localhost:3000", "http://127.0.0.1:3000"]
+)
+
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=_cors_origins,
     allow_credentials=True,
     allow_methods=["*"],
     allow_headers=["*"],
@@ -95,12 +102,15 @@ app.add_middleware(
 add_metrics_routes(app)
 
 _memory: Optional[Memory] = None
+_memory_lock = threading.Lock()
 
 
 def get_memory() -> Memory:
     global _memory
     if _memory is None:
-        _memory = Memory()
+        with _memory_lock:
+            if _memory is None:
+                _memory = Memory()
     return _memory
 
 
@@ -403,7 +413,7 @@ async def search_memories(request: SearchRequestV2, http_request: Request):
             raise require_session_error(exc)
         except Exception as exc:
             logger.exception("Error searching memories")
-            raise HTTPException(status_code=500, detail=str(exc))
+            raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/v1/scenes")
@@ -494,7 +504,7 @@ async def add_memory(request: AddMemoryRequestV2, http_request: Request):
         raise require_session_error(exc)
     except Exception as exc:
         logger.exception("Error creating proposal/direct memory")
-        raise HTTPException(status_code=500, detail=str(exc))
+        raise HTTPException(status_code=500, detail="Internal server error")
 
 
 @app.get("/v1/staging/commits")
@@ -779,7 +789,9 @@ async def get_memory_by_id(memory_id: str):
 
 @app.put("/v1/memories/{memory_id}", response_model=Dict[str, Any])
 @app.put("/v1/memories/{memory_id}/", response_model=Dict[str, Any])
-async def update_memory(memory_id: str, request: Dict[str, Any]):
+async def update_memory(memory_id: str, request: Dict[str, Any], http_request: Request):
+    token = get_token_from_request(http_request)
+    require_token_for_untrusted_request(http_request, token)
     memory = get_memory()
     result = memory.update(memory_id, request)
     return result
@@ -787,7 +799,9 @@ async def update_memory(memory_id: str, request: Dict[str, Any]):
 
 @app.delete("/v1/memories/{memory_id}")
 @app.delete("/v1/memories/{memory_id}/")
-async def delete_memory(memory_id: str):
+async def delete_memory(memory_id: str, http_request: Request):
+    token = get_token_from_request(http_request)
+    require_token_for_untrusted_request(http_request, token)
     memory = get_memory()
     memory.delete(memory_id)
     return {"status": "deleted", "id": memory_id}
@@ -796,14 +810,18 @@ async def delete_memory(memory_id: str):
 @app.delete("/v1/memories", response_model=Dict[str, Any])
 @app.delete("/v1/memories/", response_model=Dict[str, Any])
 async def delete_memories(
+    http_request: Request,
     user_id: Optional[str] = Query(default=None),
     agent_id: Optional[str] = Query(default=None),
     run_id: Optional[str] = Query(default=None),
     app_id: Optional[str] = Query(default=None),
+    dry_run: bool = Query(default=False, description="Preview what would be deleted without actually deleting"),
 ):
+    token = get_token_from_request(http_request)
+    require_token_for_untrusted_request(http_request, token)
     memory = get_memory()
     try:
-        return memory.delete_all(user_id=user_id, agent_id=agent_id, run_id=run_id, app_id=app_id)
+        return memory.delete_all(user_id=user_id, agent_id=agent_id, run_id=run_id, app_id=app_id, dry_run=dry_run)
     except FadeMemValidationError as exc:
         raise HTTPException(status_code=400, detail=exc.message)
 

@@ -63,4 +63,8 @@ class VectorStoreFactory:
             from engram.vector_stores.memory import InMemoryVectorStore
 
             return InMemoryVectorStore(config)
+        if provider == "sqlite_vec":
+            from engram.vector_stores.sqlite_vec import SqliteVecStore
+
+            return SqliteVecStore(config)
         raise ValueError(f"Unsupported vector store provider: {provider}")

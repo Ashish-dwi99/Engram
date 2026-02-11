@@ -1,7 +1,10 @@
+import logging
 import os
 from typing import Optional
 
 from engram.llms.base import BaseLLM
+
+logger = logging.getLogger(__name__)
 
 
 class GeminiLLM(BaseLLM):
@@ -26,7 +29,7 @@ class GeminiLLM(BaseLLM):
             self._client_type = "generativeai"
             self._genai = genai
             self._model = genai.GenerativeModel(self.model)
-        except Exception:
+        except ImportError:
             try:
                 from google import genai
 
@@ -38,28 +41,36 @@ class GeminiLLM(BaseLLM):
                 ) from exc
 
     def generate(self, prompt: str) -> str:
-        if self._client_type == "generativeai":
-            response = self._model.generate_content(
-                prompt,
-                generation_config={
-                    "temperature": self.temperature,
-                    "max_output_tokens": self.max_tokens,
-                },
-            )
-            return getattr(response, "text", "") or ""
+        try:
+            if self._client_type == "generativeai":
+                response = self._model.generate_content(
+                    prompt,
+                    generation_config={
+                        "temperature": self.temperature,
+                        "max_output_tokens": self.max_tokens,
+                    },
+                )
+                return getattr(response, "text", "") or ""
 
-        if self._client_type == "genai":
-            response = self._client.models.generate_content(
-                model=self.model,
-                contents=prompt,
-                config={
-                    "temperature": self.temperature,
-                    "max_output_tokens": self.max_tokens,
-                },
-            )
-            return _extract_text_from_response(response)
+            if self._client_type == "genai":
+                response = self._client.models.generate_content(
+                    model=self.model,
+                    contents=prompt,
+                    config={
+                        "temperature": self.temperature,
+                        "max_output_tokens": self.max_tokens,
+                    },
+                )
+                return _extract_text_from_response(response)
 
-        return ""
+            raise RuntimeError("Gemini LLM client not initialized")
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.error("Gemini LLM generate failed (model=%s): %s", self.model, exc)
+            raise RuntimeError(
+                f"Gemini LLM generation failed (model={self.model}): {exc}"
+            ) from exc
 
 
 def _extract_text_from_response(response) -> str:

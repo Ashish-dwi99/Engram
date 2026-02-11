@@ -36,6 +36,9 @@ class DualSearchEngine:
         allowed_confidentiality_scopes: Optional[Iterable[str]] = None,
         allowed_namespaces: Optional[Iterable[str]] = None,
     ) -> Dict[str, Any]:
+        # Materialize to avoid consuming a generator/iterator twice
+        if allowed_namespaces is not None and not isinstance(allowed_namespaces, (list, tuple, set, frozenset)):
+            allowed_namespaces = list(allowed_namespaces)
         semantic_payload = self.memory.search(
             query=query,
             user_id=user_id,

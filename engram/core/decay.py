@@ -1,5 +1,5 @@
 import math
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -15,8 +15,13 @@ def calculate_decayed_strength(
 ) -> float:
     if isinstance(last_accessed, str):
         last_accessed = datetime.fromisoformat(last_accessed)
+    if last_accessed.tzinfo is None:
+        last_accessed = last_accessed.replace(tzinfo=timezone.utc)
 
-    time_elapsed_days = (datetime.utcnow() - last_accessed).total_seconds() / 86400.0
+    if math.isnan(current_strength):
+        return 0.0
+
+    time_elapsed_days = (datetime.now(timezone.utc) - last_accessed).total_seconds() / 86400.0
     decay_rate = config.sml_decay_rate if layer == "sml" else config.lml_decay_rate
     access_dampening = 1 + config.access_dampening_factor * math.log1p(access_count)
     new_strength = current_strength * math.exp(-decay_rate * time_elapsed_days / access_dampening)
@@ -24,6 +29,8 @@ def calculate_decayed_strength(
 
 
 def should_forget(strength: float, config: "FadeMemConfig") -> bool:
+    if math.isnan(strength):
+        return True
     return strength < config.forgetting_threshold
 
 

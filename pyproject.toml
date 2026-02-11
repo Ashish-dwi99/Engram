@@ -36,6 +36,7 @@ gemini = ["google-generativeai>=0.3.0"]
 openai = ["openai>=1.0.0"]
 ollama = ["ollama>=0.4.0"]
 qdrant = ["qdrant-client>=1.7.0"]
+sqlite_vec = ["sqlite-vec>=0.1.1"]
 mcp = [
     "mcp>=1.0.0",
 ]
@@ -50,6 +51,7 @@ all = [
     "fastapi>=0.109.0",
     "uvicorn[standard]>=0.27.0",
     "aiosqlite>=0.19.0",
+    "sqlite-vec>=0.1.1",
 ]
 async = [
     "aiosqlite>=0.19.0",

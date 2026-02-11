@@ -1,19 +1,12 @@
 from __future__ import annotations
 
 import math
+import threading
 import uuid
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from engram.memory.utils import matches_filters
-from engram.vector_stores.base import VectorStoreBase
-
-
-@dataclass
-class MemoryResult:
-    id: str
-    score: float = 0.0
-    payload: Dict[str, Any] = None
+from engram.vector_stores.base import MemoryResult, VectorStoreBase
 
 
 class InMemoryVectorStore(VectorStoreBase):
@@ -22,6 +15,7 @@ class InMemoryVectorStore(VectorStoreBase):
         self.collection_name = self.config.get("collection_name", "fadem_memories")
         self.vector_size = self.config.get("embedding_model_dims")
         self._store: Dict[str, Dict[str, Any]] = {}
+        self._lock = threading.RLock()
 
     def create_col(self, name: str, vector_size: int, distance: str = "cosine") -> None:
         self.collection_name = name
@@ -34,8 +28,9 @@ class InMemoryVectorStore(VectorStoreBase):
         if ids is not None and len(ids) != len(vectors):
             raise ValueError("ids length must match vectors length")
         ids = ids or [str(uuid.uuid4()) for _ in vectors]
-        for vector_id, vector, payload in zip(ids, vectors, payloads):
-            self._store[vector_id] = {"vector": vector, "payload": payload}
+        with self._lock:
+            for vector_id, vector, payload in zip(ids, vectors, payloads):
+                self._store[vector_id] = {"vector": vector, "payload": payload}
 
     def _cosine_similarity(self, a: List[float], b: List[float]) -> float:
         if not a or not b:
@@ -49,7 +44,9 @@ class InMemoryVectorStore(VectorStoreBase):
 
     def search(self, query: Optional[str], vectors: List[float], limit: int = 5, filters: Optional[Dict[str, Any]] = None) -> List[MemoryResult]:
         results: List[MemoryResult] = []
-        for vector_id, record in self._store.items():
+        with self._lock:
+            snapshot = list(self._store.items())
+        for vector_id, record in snapshot:
             payload = record.get("payload", {})
             if filters and not matches_filters(payload, filters):
                 continue
@@ -60,35 +57,41 @@ class InMemoryVectorStore(VectorStoreBase):
         return results[:limit]
 
     def delete(self, vector_id: str) -> None:
-        if vector_id in self._store:
-            del self._store[vector_id]
+        with self._lock:
+            if vector_id in self._store:
+                del self._store[vector_id]
 
     def update(self, vector_id: str, vector: Optional[List[float]] = None, payload: Optional[Dict[str, Any]] = None) -> None:
-        if vector_id not in self._store:
-            return
-        if vector is not None:
-            self._store[vector_id]["vector"] = vector
-        if payload is not None:
-            self._store[vector_id]["payload"] = payload
+        with self._lock:
+            if vector_id not in self._store:
+                return
+            if vector is not None:
+                self._store[vector_id]["vector"] = vector
+            if payload is not None:
+                self._store[vector_id]["payload"] = payload
 
     def get(self, vector_id: str) -> Optional[MemoryResult]:
-        record = self._store.get(vector_id)
-        if not record:
-            return None
-        return MemoryResult(id=vector_id, score=0.0, payload=record.get("payload", {}))
+        with self._lock:
+            record = self._store.get(vector_id)
+            if not record:
+                return None
+            return MemoryResult(id=vector_id, score=0.0, payload=record.get("payload", {}))
 
     def list_cols(self) -> List[str]:
         return [self.collection_name]
 
     def delete_col(self) -> None:
-        self._store = {}
+        with self._lock:
+            self._store = {}
 
     def col_info(self) -> Dict[str, Any]:
         return {"name": self.collection_name, "size": len(self._store), "vector_size": self.vector_size}
 
     def list(self, filters: Optional[Dict[str, Any]] = None, limit: Optional[int] = None) -> List[MemoryResult]:
         results: List[MemoryResult] = []
-        for vector_id, record in self._store.items():
+        with self._lock:
+            snapshot = list(self._store.items())
+        for vector_id, record in snapshot:
             payload = record.get("payload", {})
             if filters and not matches_filters(payload, filters):
                 continue
@@ -98,4 +101,5 @@ class InMemoryVectorStore(VectorStoreBase):
         return results
 
     def reset(self) -> None:
-        self._store = {}
+        with self._lock:
+            self._store = {}
