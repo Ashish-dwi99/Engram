@@ -6,7 +6,7 @@ import hashlib
 import os
 import secrets
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Set
 
 from engram.core.invariants import InvariantEngine
@@ -136,7 +136,7 @@ class PersonalMemoryKernel:
 
         token = secrets.token_urlsafe(32)
         token_hash = hashlib.sha256(token.encode("utf-8")).hexdigest()
-        expires_at = (datetime.utcnow() + timedelta(minutes=max(1, ttl_minutes))).isoformat()
+        expires_at = (datetime.now(timezone.utc) + timedelta(minutes=max(1, ttl_minutes))).isoformat()
 
         session_id = self.db.create_session(
             {
@@ -184,7 +184,7 @@ class PersonalMemoryKernel:
         expires_at = session.get("expires_at")
         if expires_at:
             exp_dt = datetime.fromisoformat(expires_at)
-            if datetime.utcnow() > exp_dt:
+            if datetime.now(timezone.utc) > exp_dt:
                 raise PermissionError("Session expired")
 
         if user_id and session.get("user_id") not in {None, user_id}:
@@ -234,6 +234,8 @@ class PersonalMemoryKernel:
         namespaces: Optional[List[str]],
     ) -> Optional[Dict[str, Any]]:
         handoff_cfg = getattr(self.memory, "handoff_config", None)
+        if not bool(getattr(handoff_cfg, "allow_auto_trusted_bootstrap", False)):
+            return None
         trusted_agents = {
             str(value).strip().lower()
             for value in getattr(handoff_cfg, "auto_trusted_agents", [])
@@ -289,6 +291,28 @@ class PersonalMemoryKernel:
         )
         return values
 
+    @staticmethod
+    def _clamp_with_policy(
+        *,
+        requested: List[str],
+        allowed: List[str],
+        label: str,
+        user_id: str,
+        agent_id: Optional[str],
+    ) -> List[str]:
+        """Generic clamping: intersect requested with allowed, respecting wildcards."""
+        allowed_set = set(allowed)
+        if "*" in allowed_set:
+            return sorted(set(requested))
+        if not allowed_set:
+            raise PermissionError(f"Agent policy denies {label} for user={user_id} agent={agent_id}")
+        clamped = [item for item in requested if item in allowed_set]
+        if not clamped:
+            raise PermissionError(
+                f"Requested {label} are not allowed by policy for user={user_id} agent={agent_id}"
+            )
+        return sorted(set(clamped))
+
     def _clamp_scopes_with_policy(
         self,
         *,
@@ -297,19 +321,16 @@ class PersonalMemoryKernel:
         user_id: str,
         agent_id: Optional[str],
     ) -> List[str]:
-        allowed = self._normalize_policy_scopes(policy_scopes)
-        if "*" in set(str(scope).strip() for scope in (policy_scopes or [])):
+        # Check raw policy for wildcard before normalization strips it.
+        if "*" in {str(s).strip() for s in (policy_scopes or [])}:
             return requested_scopes
-        if not allowed:
-            raise PermissionError(
-                f"Agent policy denies confidentiality scopes for user={user_id} agent={agent_id}"
-            )
-        clamped = [scope for scope in requested_scopes if scope in set(allowed)]
-        if not clamped:
-            raise PermissionError(
-                f"Requested confidentiality scopes are not allowed by policy for user={user_id} agent={agent_id}"
-            )
-        return sorted(set(clamped))
+        return self._clamp_with_policy(
+            requested=requested_scopes,
+            allowed=self._normalize_policy_scopes(policy_scopes),
+            label="confidentiality scopes",
+            user_id=user_id,
+            agent_id=agent_id,
+        )
 
     def _clamp_capabilities_with_policy(
         self,
@@ -319,19 +340,13 @@ class PersonalMemoryKernel:
         user_id: str,
         agent_id: Optional[str],
     ) -> List[str]:
-        allowed = self._normalize_policy_capabilities(policy_capabilities)
-        if "*" in set(allowed):
-            return sorted(set(requested_capabilities))
-        if not allowed:
-            raise PermissionError(
-                f"Agent policy denies capabilities for user={user_id} agent={agent_id}"
-            )
-        clamped = [capability for capability in requested_capabilities if capability in set(allowed)]
-        if not clamped:
-            raise PermissionError(
-                f"Requested capabilities are not allowed by policy for user={user_id} agent={agent_id}"
-            )
-        return sorted(set(clamped))
+        return self._clamp_with_policy(
+            requested=requested_capabilities,
+            allowed=self._normalize_policy_capabilities(policy_capabilities),
+            label="capabilities",
+            user_id=user_id,
+            agent_id=agent_id,
+        )
 
     def _clamp_namespaces_with_policy(
         self,
@@ -341,17 +356,13 @@ class PersonalMemoryKernel:
         user_id: str,
         agent_id: Optional[str],
     ) -> List[str]:
-        allowed = self._normalize_policy_namespaces(policy_namespaces)
-        if "*" in set(allowed):
-            return sorted(set(requested_namespaces))
-        if not allowed:
-            raise PermissionError(f"Agent policy denies namespaces for user={user_id} agent={agent_id}")
-        clamped = [namespace for namespace in requested_namespaces if namespace in set(allowed)]
-        if not clamped:
-            raise PermissionError(
-                f"Requested namespaces are not allowed by policy for user={user_id} agent={agent_id}"
-            )
-        return sorted(set(clamped))
+        return self._clamp_with_policy(
+            requested=requested_namespaces,
+            allowed=self._normalize_policy_namespaces(policy_namespaces),
+            label="namespaces",
+            user_id=user_id,
+            agent_id=agent_id,
+        )
 
     def _resolve_allowed_namespaces(
         self,
@@ -389,19 +400,17 @@ class PersonalMemoryKernel:
         allowed_namespaces: List[str],
     ) -> List[Dict[str, Any]]:
         if "*" in allowed_namespaces:
-            visible = []
+            # Fast path: no masking needed, avoid copying dicts.
             for item in items:
-                value = dict(item)
-                value["masked"] = False
-                visible.append(value)
-            return visible
+                item["masked"] = False
+            return items
+        allowed_set = set(allowed_namespaces)
         filtered: List[Dict[str, Any]] = []
         for item in items:
             namespace = self._normalize_namespace(item.get("namespace"))
-            if self._is_namespace_allowed(namespace, allowed_namespaces):
-                value = dict(item)
-                value["masked"] = bool(value.get("masked", False))
-                filtered.append(value)
+            if namespace in allowed_set or "*" in allowed_set:
+                item["masked"] = bool(item.get("masked", False))
+                filtered.append(item)
             else:
                 filtered.append(self._mask_for_namespace(item))
         return filtered
@@ -436,6 +445,68 @@ class PersonalMemoryKernel:
 
         rejection_rate = (rejected / total) if total > 0 else 1.0
         return rejection_rate <= max(0.0, max_reject_rate)
+
+    def _enforce_write_quotas(
+        self,
+        *,
+        user_id: str,
+        agent_id: Optional[str],
+    ) -> None:
+        if not feature_enabled("ENGRAM_V2_POLICY_GATEWAY", default=True):
+            return
+
+        now = datetime.now(timezone.utc)
+        windows: List[Dict[str, Any]] = [
+            {
+                "env": "ENGRAM_V2_POLICY_WRITE_QUOTA_PER_USER_PER_HOUR",
+                "label": "per-user hourly",
+                "user_id": user_id,
+                "agent_id": None,
+                "since": (now - timedelta(hours=1)).isoformat(),
+            },
+            {
+                "env": "ENGRAM_V2_POLICY_WRITE_QUOTA_PER_USER_PER_DAY",
+                "label": "per-user daily",
+                "user_id": user_id,
+                "agent_id": None,
+                "since": (now - timedelta(days=1)).isoformat(),
+            },
+        ]
+        if agent_id:
+            windows.extend(
+                [
+                    {
+                        "env": "ENGRAM_V2_POLICY_WRITE_QUOTA_PER_AGENT_PER_HOUR",
+                        "label": "per-agent hourly",
+                        "user_id": user_id,
+                        "agent_id": agent_id,
+                        "since": (now - timedelta(hours=1)).isoformat(),
+                    },
+                    {
+                        "env": "ENGRAM_V2_POLICY_WRITE_QUOTA_PER_AGENT_PER_DAY",
+                        "label": "per-agent daily",
+                        "user_id": user_id,
+                        "agent_id": agent_id,
+                        "since": (now - timedelta(days=1)).isoformat(),
+                    },
+                ]
+            )
+
+        for window in windows:
+            limit = self._parse_int_env(window["env"], 0)
+            if limit <= 0:
+                continue
+
+            count = self.db.count_proposal_commits(
+                user_id=window["user_id"],
+                agent_id=window["agent_id"],
+                since=window["since"],
+            )
+            if count >= limit:
+                raise PermissionError(
+                    f"Write quota exceeded ({window['label']}): "
+                    f"{count}/{limit} proposals in active window"
+                )
 
     # ------------------------------------------------------------------
     # Read path
@@ -659,6 +730,7 @@ class PersonalMemoryKernel:
             )
             if not self._is_namespace_allowed(namespace_value, allowed_write_namespaces):
                 raise PermissionError(f"Namespace access denied: {namespace_value}")
+            self._enforce_write_quotas(user_id=user_id, agent_id=agent_id)
         self.db.ensure_namespace(user_id=user_id, name=namespace_value)
 
         if mode == "staging" and not feature_enabled("ENGRAM_V2_STAGING_WRITES", default=True):
@@ -780,6 +852,35 @@ class PersonalMemoryKernel:
         metadata = dict(metadata)
         metadata.update(provenance)
         metadata["allow_sensitive"] = True
+        namespace_value = self._normalize_namespace(metadata.get("namespace"))
+        metadata["namespace"] = namespace_value
+
+        source_event_id = str(provenance.get("source_event_id") or "").strip()
+        source_app = provenance.get("source_app") or source_app
+        if source_event_id:
+            existing = self.db.get_memory_by_source_event(
+                user_id=user_id,
+                source_event_id=source_event_id,
+                namespace=namespace_value,
+                source_app=source_app,
+            )
+            if existing:
+                existing_text = str(existing.get("memory") or "").strip()
+                proposed_text = str(content or "").strip()
+                if existing_text != proposed_text:
+                    raise ValueError(
+                        f"source_event_id={source_event_id} already exists with different content"
+                    )
+                return {
+                    "mode": "direct",
+                    "result": {
+                        "results": [{"id": existing.get("id"), "status": "EXISTING"}],
+                        "count": 1,
+                        "idempotent": True,
+                    },
+                    "created_ids": [],
+                }
+
         sharing_scope = str(metadata.get("sharing_scope", "global")).lower()
         result = self.memory.add(
             messages=content,
@@ -792,30 +893,29 @@ class PersonalMemoryKernel:
             source_app=source_app,
         )
 
-        for item in result.get("results", []):
-            memory_id = item.get("id")
-            if not memory_id:
-                continue
-            created = self.memory.db.get_memory(memory_id)
+        # Pre-compute provenance fields to patch onto created memories in one update.
+        patch_fields = {
+            "confidentiality_scope": metadata.get("confidentiality_scope", "work"),
+            "source_type": provenance.get("source_type"),
+            "source_app": provenance.get("source_app"),
+            "source_event_id": provenance.get("source_event_id"),
+            "status": "active",
+            "namespace": self._normalize_namespace(metadata.get("namespace")),
+        }
+
+        created_ids: List[str] = []
+        result_items = result.get("results", [])
+        memory_ids = [item.get("id") for item in result_items if item.get("id")]
+
+        # Batch-fetch all created memories in one query instead of N queries.
+        created_map = self.memory.db.get_memories_bulk(memory_ids) if memory_ids else {}
+
+        for memory_id in memory_ids:
+            created = created_map.get(memory_id)
             if not created:
                 continue
-            created["confidentiality_scope"] = metadata.get("confidentiality_scope", "work")
-            created["source_type"] = provenance.get("source_type")
-            created["source_app"] = provenance.get("source_app")
-            created["source_event_id"] = provenance.get("source_event_id")
-            created["status"] = "active"
-            created["namespace"] = self._normalize_namespace(metadata.get("namespace"))
-            self.memory.db.update_memory(
-                memory_id,
-                {
-                    "confidentiality_scope": created["confidentiality_scope"],
-                    "source_type": created["source_type"],
-                    "source_app": created["source_app"],
-                    "source_event_id": created["source_event_id"],
-                    "status": created["status"],
-                    "namespace": created["namespace"],
-                },
-            )
+            created_ids.append(memory_id)
+            self.memory.db.update_memory(memory_id, patch_fields)
             self.episodic_store.ingest_memory_as_view(
                 user_id=user_id,
                 agent_id=agent_id,
@@ -833,6 +933,7 @@ class PersonalMemoryKernel:
         return {
             "mode": "direct",
             "result": result,
+            "created_ids": created_ids,
         }
 
     def list_pending_commits(
@@ -912,8 +1013,14 @@ class PersonalMemoryKernel:
                         source_app=patch.get("source_app"),
                     )
                     applied.append(outcome)
-                    for row in outcome.get("result", {}).get("results", []):
-                        memory_id = row.get("id")
+                    created_ids = outcome.get("created_ids")
+                    if created_ids is None:
+                        created_ids = [
+                            row.get("id")
+                            for row in outcome.get("result", {}).get("results", [])
+                            if row.get("id")
+                        ]
+                    for memory_id in created_ids:
                         if memory_id:
                             created_memory_ids.append(memory_id)
                 elif target == "memory_item" and op == "UPDATE":
@@ -1139,7 +1246,7 @@ class PersonalMemoryKernel:
                 require_for_agent=bool(agent_id),
                 required_capabilities=["run_sleep_cycle"],
             )
-        target_date = date_str or (datetime.utcnow() - timedelta(days=1)).date().isoformat()
+        target_date = date_str or (datetime.now(timezone.utc) - timedelta(days=1)).date().isoformat()
         users = [user_id] if user_id else self.db.list_user_ids()
         if not users:
             users = ["default"]
@@ -1159,8 +1266,11 @@ class PersonalMemoryKernel:
                 "scenes_considered": 0,
                 "decay": {"decayed": 0, "forgotten": 0, "promoted": 0},
             }
-            memories = self.db.get_all_memories(user_id=uid)
-            day_memories = [m for m in memories if str(m.get("created_at", "")).startswith(target_date)]
+            day_memories = self.db.get_all_memories(
+                user_id=uid,
+                created_after=day_start,
+                created_before=day_end,
+            )
 
             # Ensure CAST views/scenes are available for the day.
             for memory in day_memories:

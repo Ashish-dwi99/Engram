@@ -58,15 +58,7 @@ _NAME_EXTRACT = re.compile(
 )
 
 
-def _cosine_similarity(a: List[float], b: List[float]) -> float:
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+from engram.utils.math import cosine_similarity as _cosine_similarity
 
 
 class ProfileProcessor:
@@ -260,22 +252,14 @@ class ProfileProcessor:
 
     def _find_profile(self, name: str, user_id: str) -> Optional[Dict[str, Any]]:
         """Find a profile by name or alias, with fuzzy matching."""
-        # Exact match first
+        # Fast path: exact or alias match (uses indexed SQL query).
         profile = self.db.get_profile_by_name(name, user_id=user_id)
         if profile:
             return profile
 
-        # Check all profiles for partial match
-        all_profiles = self.db.get_all_profiles(user_id=user_id)
-        name_lower = name.lower()
-        for p in all_profiles:
-            p_name = p["name"].lower()
-            aliases = [a.lower() for a in p.get("aliases", [])]
-            # Substring match (e.g. "John" matches "John Smith")
-            if name_lower in p_name or p_name in name_lower:
-                return p
-            if any(name_lower in a or a in name_lower for a in aliases):
-                return p
+        # Slow path: substring match on name (e.g. "John" matches "John Smith").
+        if hasattr(self.db, "find_profile_by_substring"):
+            return self.db.find_profile_by_substring(name, user_id=user_id)
 
         return None
 
@@ -408,6 +392,9 @@ class ProfileProcessor:
         if not all_profiles:
             return []
 
+        query_lower = query.lower()
+        query_words = query_lower.split()
+
         if self.embedder:
             query_embedding = self.embedder.embed(query, memory_action="search")
             scored = []
@@ -417,9 +404,8 @@ class ProfileProcessor:
                     sim = _cosine_similarity(query_embedding, p_emb)
                     scored.append((p, sim))
                 else:
-                    # Keyword fallback
                     text = f"{p.get('name', '')} {' '.join(p.get('facts', []))} {' '.join(p.get('preferences', []))}".lower()
-                    kw_score = sum(1 for w in query.lower().split() if w in text) * 0.1
+                    kw_score = sum(1 for w in query_words if w in text) * 0.1
                     if kw_score > 0:
                         scored.append((p, kw_score))
             scored.sort(key=lambda x: x[1], reverse=True)
@@ -429,13 +415,12 @@ class ProfileProcessor:
                 results.append(p)
             return results
         else:
-            # Keyword-only search
-            query_lower = query.lower()
             scored = []
             for p in all_profiles:
                 text = f"{p.get('name', '')} {' '.join(p.get('facts', []))} {' '.join(p.get('preferences', []))}".lower()
-                score = sum(1 for w in query_lower.split() if w in text)
-                if score > 0 or query_lower in p.get("name", "").lower():
-                    scored.append((p, score + (1 if query_lower in p.get("name", "").lower() else 0)))
+                name_match = query_lower in p.get("name", "").lower()
+                score = sum(1 for w in query_words if w in text)
+                if score > 0 or name_match:
+                    scored.append((p, score + (1 if name_match else 0)))
             scored.sort(key=lambda x: x[1], reverse=True)
             return [p for p, _ in scored[:limit]]

@@ -3,17 +3,21 @@
 from __future__ import annotations
 
 import logging
-from datetime import datetime
+import json
+from datetime import datetime, timezone
+
+_UTC = timezone.utc
 from typing import Any, Dict, List, Optional, Tuple
 
 from engram.core.policy import ALL_CONFIDENTIALITY_SCOPES, DEFAULT_CAPABILITIES, HANDOFF_CAPABILITIES
 from engram.utils.repo_identity import canonicalize_repo_identity
 
 logger = logging.getLogger(__name__)
+HANDOFF_SESSION_STATUSES = {"active", "paused", "completed", "abandoned"}
 
 
 def _utc_now_iso() -> str:
-    return datetime.utcnow().isoformat()
+    return datetime.now(tz=_UTC).isoformat()
 
 
 def _safe_dt(value: Optional[str]) -> Optional[datetime]:
@@ -40,6 +44,13 @@ def _merge_list_values(existing: Any, incoming: Any) -> List[str]:
     return merged
 
 
+def _stable_json(value: Any) -> str:
+    try:
+        return json.dumps(value, sort_keys=True, default=str)
+    except Exception:
+        return str(value)
+
+
 class HandoffSessionBus:
     """Server-side session bus with lane routing and automatic checkpointing."""
 
@@ -57,9 +68,15 @@ class HandoffSessionBus:
         cfg = config or {}
         self.auto_enrich = bool(cfg.get("auto_enrich", True))
         self.max_sessions_per_user = int(cfg.get("max_sessions", 100))
+        self.handoff_backend = str(cfg.get("handoff_backend", "hosted"))
+        self.strict_handoff_auth = bool(cfg.get("strict_handoff_auth", True))
+        self.allow_auto_trusted_bootstrap = bool(cfg.get("allow_auto_trusted_bootstrap", False))
         self.max_lanes_per_user = int(cfg.get("max_lanes_per_user", 50))
         self.max_checkpoints_per_lane = int(cfg.get("max_checkpoints_per_lane", 200))
-        self.resume_statuses = [str(v).strip() for v in cfg.get("resume_statuses", ["active", "paused"]) if str(v).strip()]
+        self.resume_statuses = self._normalize_status_list(
+            cfg.get("resume_statuses", ["active", "paused"]),
+            fallback=["active", "paused"],
+        )
         self.lane_inactivity_minutes = int(cfg.get("lane_inactivity_minutes", 240))
         self.auto_trusted_agents = {
             str(agent).strip().lower()
@@ -90,7 +107,7 @@ class HandoffSessionBus:
     ) -> Dict[str, Any]:
         self._bootstrap_auto_trusted_policy(user_id=user_id, agent_id=agent_id, namespace=namespace)
         repo_identity = canonicalize_repo_identity(repo_path, branch=branch)
-        allowed_statuses = statuses or list(self.resume_statuses)
+        allowed_statuses = self._normalize_status_list(statuses, fallback=list(self.resume_statuses))
 
         lane, created = self._select_or_create_lane(
             user_id=user_id,
@@ -195,6 +212,7 @@ class HandoffSessionBus:
             )
 
         target_version = int(lane.get("version", 0)) + 1
+        persisted_version = target_version
         lane_status = str(normalized_payload.get("status") or lane.get("status") or "active")
         lane_updates = {
             "status": lane_status,
@@ -219,7 +237,7 @@ class HandoffSessionBus:
             fresh_lane = self.db.get_handoff_lane(lane["id"]) or lane
             fresh_state = dict(fresh_lane.get("current_state") or {})
             resolved_state, merge_conflicts = self._merge_state(fresh_state, normalized_payload)
-            all_conflicts = list(conflicts) + list(merge_conflicts)
+            all_conflicts = self._dedupe_conflicts(list(conflicts) + list(merge_conflicts))
             self.db.update_handoff_lane(
                 lane["id"],
                 {
@@ -232,6 +250,13 @@ class HandoffSessionBus:
             )
             conflicts = all_conflicts
             merged_state = resolved_state
+            persisted = self.db.get_handoff_lane(lane["id"])
+            if persisted:
+                persisted_version = int(persisted.get("version", persisted_version))
+        else:
+            persisted = self.db.get_handoff_lane(lane["id"])
+            if persisted:
+                persisted_version = int(persisted.get("version", persisted_version))
 
         if conflicts:
             self.db.add_handoff_lane_conflict(
@@ -254,7 +279,7 @@ class HandoffSessionBus:
             "lane_id": lane["id"],
             "checkpoint_id": checkpoint_id,
             "status": lane_status,
-            "version": target_version,
+            "version": persisted_version,
             "conflicts": conflicts,
             "enrichment": enrichment,
         }
@@ -272,6 +297,7 @@ class HandoffSessionBus:
         agent_role: Optional[str] = None,
         namespace: str = "default",
     ) -> Dict[str, Any]:
+        normalized_status = self._normalize_status(status, default="paused")
         result = self.auto_checkpoint(
             user_id=user_id,
             agent_id=agent_id,
@@ -285,8 +311,8 @@ class HandoffSessionBus:
         )
         lane = self.db.get_handoff_lane(lane_id)
         if lane:
-            self.db.update_handoff_lane(lane_id, {"status": status})
-        result["lane_status"] = status
+            self.db.update_handoff_lane(lane_id, {"status": normalized_status})
+        result["lane_status"] = normalized_status
         return result
 
     def list_lanes(
@@ -299,11 +325,17 @@ class HandoffSessionBus:
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
         repo_identity = canonicalize_repo_identity(repo_path, branch=None) if repo_path else {"repo_id": None}
+        normalized_status = self._normalize_optional_status(status)
+        normalized_statuses = (
+            self._normalize_status_list(statuses, fallback=[], allow_empty=True)
+            if statuses is not None
+            else None
+        )
         return self.db.list_handoff_lanes(
             user_id=user_id,
             repo_id=repo_identity.get("repo_id"),
-            status=status,
-            statuses=statuses,
+            status=normalized_status,
+            statuses=normalized_statuses,
             limit=limit,
         )
 
@@ -314,7 +346,7 @@ class HandoffSessionBus:
     def save_session_digest(self, user_id: str, agent_id: str, digest: Dict[str, Any]) -> Dict[str, Any]:
         repo_path = digest.get("repo")
         repo_identity = canonicalize_repo_identity(repo_path, branch=digest.get("branch"))
-        status = str(digest.get("status") or "paused")
+        status = self._normalize_status(digest.get("status"), default="paused")
         checkpoint_payload = {
             "status": status,
             "task_summary": digest.get("task_summary"),
@@ -429,7 +461,7 @@ class HandoffSessionBus:
         statuses: Optional[List[str]] = None,
     ) -> Optional[Dict[str, Any]]:
         repo_identity = canonicalize_repo_identity(repo, branch=None) if repo else {"repo_id": None}
-        preferred_statuses = statuses or list(self.resume_statuses)
+        preferred_statuses = self._normalize_status_list(statuses, fallback=list(self.resume_statuses))
         repo_candidates: List[Optional[str]] = [repo_identity.get("repo_id")]
         if repo_candidates[0] is not None:
             repo_candidates.append(None)
@@ -445,6 +477,23 @@ class HandoffSessionBus:
             if session:
                 return self.get_handoff_context(session["id"])
 
+        # Compatibility fallback: if preferred-status legacy sessions are absent,
+        # derive context from active lane/checkpoint state before broadening status.
+        for repo_id in repo_candidates:
+            lane_packet = self._latest_lane_resume_packet(
+                user_id=user_id,
+                agent_id=agent_id,
+                repo_id=repo_id,
+                statuses=preferred_statuses,
+            )
+            if lane_packet:
+                return lane_packet
+
+        # Historical fallback is only used for default behavior. If callers pass
+        # explicit statuses, respect that filter strictly.
+        if statuses is not None:
+            return None
+
         for repo_id in repo_candidates:
             session = self.db.get_last_handoff_session(
                 user_id=user_id,
@@ -456,17 +505,6 @@ class HandoffSessionBus:
             if session:
                 return self.get_handoff_context(session["id"])
 
-        # Compatibility fallback: if legacy sessions are absent, derive context
-        # from the latest lane/checkpoint state so resume still works.
-        for repo_id in repo_candidates:
-            lane_packet = self._latest_lane_resume_packet(
-                user_id=user_id,
-                agent_id=agent_id,
-                repo_id=repo_id,
-                statuses=preferred_statuses,
-            )
-            if lane_packet:
-                return lane_packet
         for repo_id in repo_candidates:
             lane_packet = self._latest_lane_resume_packet(
                 user_id=user_id,
@@ -489,13 +527,19 @@ class HandoffSessionBus:
         limit: int = 20,
     ) -> List[Dict[str, Any]]:
         repo_identity = canonicalize_repo_identity(repo, branch=None) if repo else {"repo_id": None}
+        normalized_status = self._normalize_optional_status(status)
+        normalized_statuses = (
+            self._normalize_status_list(statuses, fallback=[], allow_empty=True)
+            if statuses is not None
+            else None
+        )
         sessions = self.db.list_handoff_sessions(
             user_id=user_id,
             agent_id=agent_id,
             repo=repo,
             repo_id=repo_identity.get("repo_id"),
-            status=status,
-            statuses=statuses,
+            status=normalized_status,
+            statuses=normalized_statuses,
             limit=limit,
         )
         if sessions:
@@ -505,8 +549,8 @@ class HandoffSessionBus:
             user_id=user_id,
             agent_id=agent_id,
             repo_id=repo_identity.get("repo_id"),
-            status=status,
-            statuses=statuses,
+            status=normalized_status,
+            statuses=normalized_statuses,
             limit=limit,
         )
         if lane_sessions or repo_identity.get("repo_id") is None:
@@ -515,8 +559,8 @@ class HandoffSessionBus:
             user_id=user_id,
             agent_id=agent_id,
             repo_id=None,
-            status=status,
-            statuses=statuses,
+            status=normalized_status,
+            statuses=normalized_statuses,
             limit=limit,
         )
 
@@ -524,11 +568,19 @@ class HandoffSessionBus:
     # Internal helpers
     # ------------------------------------------------------------------
 
+    # Cache bootstrapped policies to avoid a DB query on every checkpoint/resume.
+    _bootstrapped_policies: set = set()
+
     def _bootstrap_auto_trusted_policy(self, *, user_id: str, agent_id: Optional[str], namespace: str) -> None:
+        if not self.allow_auto_trusted_bootstrap:
+            return
         if not user_id or not agent_id:
             return
         normalized_agent = str(agent_id).strip().lower()
         if normalized_agent not in self.auto_trusted_agents:
+            return
+        cache_key = f"{user_id}::{normalized_agent}"
+        if cache_key in self._bootstrapped_policies:
             return
         existing = self.db.get_agent_policy(
             user_id=user_id,
@@ -536,6 +588,7 @@ class HandoffSessionBus:
             include_wildcard=False,
         )
         if existing:
+            self._bootstrapped_policies.add(cache_key)
             return
         capabilities = sorted(set(list(DEFAULT_CAPABILITIES) + list(HANDOFF_CAPABILITIES)))
         namespaces = ["default"]
@@ -549,6 +602,81 @@ class HandoffSessionBus:
             allowed_capabilities=capabilities,
             allowed_namespaces=namespaces,
         )
+        self._bootstrapped_policies.add(cache_key)
+
+    @staticmethod
+    def _normalize_status(value: Optional[str], *, default: str) -> str:
+        normalized = str(value or "").strip().lower()
+        if normalized in HANDOFF_SESSION_STATUSES:
+            return normalized
+        return default
+
+    @staticmethod
+    def _normalize_optional_status(value: Optional[str]) -> Optional[str]:
+        if value is None:
+            return None
+        normalized = str(value).strip().lower()
+        if normalized in HANDOFF_SESSION_STATUSES:
+            return normalized
+        raise ValueError(
+            "Invalid handoff status: "
+            f"{value!r}. Allowed: {', '.join(sorted(HANDOFF_SESSION_STATUSES))}"
+        )
+
+    @staticmethod
+    def _normalize_status_list(
+        values: Optional[List[str]],
+        *,
+        fallback: List[str],
+        allow_empty: bool = False,
+    ) -> List[str]:
+        if values is None:
+            return list(fallback)
+
+        raw_values: List[str]
+        if isinstance(values, str):
+            raw_values = [v for v in values.split(",")]
+        else:
+            raw_values = [str(v) for v in values]
+
+        normalized: List[str] = []
+        invalid: List[str] = []
+        for value in raw_values:
+            item = str(value).strip().lower()
+            if not item:
+                continue
+            if item not in HANDOFF_SESSION_STATUSES:
+                invalid.append(item)
+                continue
+            if item not in normalized:
+                normalized.append(item)
+
+        if invalid:
+            bad = ", ".join(sorted(set(invalid)))
+            allowed = ", ".join(sorted(HANDOFF_SESSION_STATUSES))
+            raise ValueError(f"Invalid handoff statuses: {bad}. Allowed: {allowed}")
+
+        if normalized:
+            return normalized
+        if allow_empty:
+            return []
+        return list(fallback)
+
+    @staticmethod
+    def _dedupe_conflicts(conflicts: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+        deduped: List[Dict[str, Any]] = []
+        seen = set()
+        for conflict in conflicts:
+            key = (
+                conflict.get("field"),
+                _stable_json(conflict.get("previous")),
+                _stable_json(conflict.get("incoming")),
+            )
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(conflict)
+        return deduped
 
     def _latest_lane_resume_packet(
         self,
@@ -722,7 +850,11 @@ class HandoffSessionBus:
 
         last_checkpoint = _safe_dt(lane.get("last_checkpoint_at") or lane.get("updated_at") or lane.get("created_at"))
         if last_checkpoint:
-            age_minutes = max(0.0, (datetime.utcnow() - last_checkpoint).total_seconds() / 60.0)
+            now = datetime.now(tz=_UTC)
+            # Ensure last_checkpoint is offset-aware for comparison.
+            if last_checkpoint.tzinfo is None:
+                last_checkpoint = last_checkpoint.replace(tzinfo=_UTC)
+            age_minutes = max(0.0, (now - last_checkpoint).total_seconds() / 60.0)
             score += max(0.0, 0.1 - min(age_minutes, 24 * 60) / (24 * 60 * 10))
             if age_minutes > self.lane_inactivity_minutes and lane.get("status") == "active":
                 score -= 0.2
@@ -731,7 +863,7 @@ class HandoffSessionBus:
     def _normalize_checkpoint_payload(self, payload: Dict[str, Any]) -> Dict[str, Any]:
         payload = dict(payload or {})
         normalized = {
-            "status": str(payload.get("status") or "active"),
+            "status": self._normalize_status(payload.get("status"), default="active"),
             "task_summary": str(payload.get("task_summary") or "").strip(),
             "decisions_made": _merge_list_values([], payload.get("decisions_made", [])),
             "files_touched": _merge_list_values([], payload.get("files_touched", [])),

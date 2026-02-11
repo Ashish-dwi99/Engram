@@ -15,7 +15,7 @@ import logging
 import re
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 logger = logging.getLogger(__name__)
@@ -38,16 +38,7 @@ _LOCATION_PATTERN = re.compile(
 )
 
 
-def _cosine_similarity(a: List[float], b: List[float]) -> float:
-    """Compute cosine similarity between two vectors."""
-    if not a or not b or len(a) != len(b):
-        return 0.0
-    dot = sum(x * y for x, y in zip(a, b))
-    norm_a = sum(x * x for x in a) ** 0.5
-    norm_b = sum(x * x for x in b) ** 0.5
-    if norm_a == 0 or norm_b == 0:
-        return 0.0
-    return dot / (norm_a * norm_b)
+from engram.utils.math import cosine_similarity as _cosine_similarity
 
 
 def _detect_location(content: str) -> Optional[str]:
@@ -116,13 +107,14 @@ class SceneProcessor:
 
         # 3. Topic shift (cosine similarity)
         scene_embedding = current_scene.get("embedding")
+        topic_sim: Optional[float] = None
         if embedding and scene_embedding:
-            sim = _cosine_similarity(embedding, scene_embedding)
-            if sim < self.topic_threshold:
+            topic_sim = _cosine_similarity(embedding, scene_embedding)
+            if topic_sim < self.topic_threshold:
                 return SceneDetectionResult(
                     is_new_scene=True,
                     reason="topic_shift",
-                    topic_similarity=sim,
+                    topic_similarity=topic_sim,
                 )
 
         # 4. Location change
@@ -142,11 +134,7 @@ class SceneProcessor:
         return SceneDetectionResult(
             is_new_scene=False,
             detected_location=detected_location,
-            topic_similarity=(
-                _cosine_similarity(embedding, scene_embedding)
-                if embedding and scene_embedding
-                else None
-            ),
+            topic_similarity=topic_sim,
         )
 
     # ------------------------------------------------------------------
@@ -211,14 +199,16 @@ class SceneProcessor:
         if namespace:
             updates["namespace"] = namespace
 
-        # Running average of embeddings
+        # Running average of embeddings (incremental centroid).
         if embedding and scene.get("embedding"):
             old_emb = scene["embedding"]
-            n = max(position, 1)
-            updates["embedding"] = [
-                (old_emb[i] * n + embedding[i]) / (n + 1)
-                for i in range(len(embedding))
-            ]
+            if len(old_emb) == len(embedding):
+                n = max(position, 1)
+                inv = 1.0 / (n + 1)
+                updates["embedding"] = [
+                    old_emb[i] * (n * inv) + embedding[i] * inv
+                    for i in range(len(embedding))
+                ]
 
         self.db.update_scene(scene_id, updates)
         self.db.add_scene_memory(scene_id, memory_id, position=position)
@@ -235,7 +225,7 @@ class SceneProcessor:
 
         updates: Dict[str, Any] = {}
         if not scene.get("end_time"):
-            updates["end_time"] = timestamp or datetime.utcnow().isoformat()
+            updates["end_time"] = timestamp or datetime.now(timezone.utc).isoformat()
 
         # Generate summary
         if self.use_llm_summarization and self.llm:
@@ -262,7 +252,11 @@ class SceneProcessor:
 
         try:
             last_dt = datetime.fromisoformat(end_time)
-            if datetime.utcnow() - last_dt > timedelta(minutes=self.auto_close_minutes):
+            now = datetime.now(timezone.utc)
+            # Make last_dt offset-aware if naive.
+            if last_dt.tzinfo is None:
+                last_dt = last_dt.replace(tzinfo=timezone.utc)
+            if now - last_dt > timedelta(minutes=self.auto_close_minutes):
                 self.close_scene(open_scene["id"])
                 return [open_scene["id"]]
         except (ValueError, TypeError):
@@ -311,17 +305,20 @@ class SceneProcessor:
         limit: int = 10,
     ) -> List[Dict[str, Any]]:
         """Search scenes by matching query against summaries and topics."""
-        all_scenes = self.db.get_scenes(user_id=user_id, limit=limit * 5)
+        # Fetch a bounded candidate set (3x limit is sufficient for re-ranking).
+        candidate_limit = min(limit * 3, 150)
+        all_scenes = self.db.get_scenes(user_id=user_id, limit=candidate_limit)
         if not all_scenes:
             return []
 
+        query_lower = query.lower()
+        query_words = query_lower.split()
+
         if not self.embedder:
-            # Fallback: keyword match
-            query_lower = query.lower()
             scored = []
             for s in all_scenes:
                 text = f"{s.get('title', '')} {s.get('summary', '')} {s.get('topic', '')}".lower()
-                score = sum(1 for w in query_lower.split() if w in text)
+                score = sum(1 for w in query_words if w in text)
                 if score > 0:
                     scored.append((s, score))
             scored.sort(key=lambda x: x[1], reverse=True)
@@ -335,9 +332,8 @@ class SceneProcessor:
                 sim = _cosine_similarity(query_embedding, scene_emb)
                 scored.append((s, sim))
             else:
-                # Fallback to text match
                 text = f"{s.get('title', '')} {s.get('summary', '')} {s.get('topic', '')}".lower()
-                keyword_score = sum(1 for w in query.lower().split() if w in text) * 0.1
+                keyword_score = sum(1 for w in query_words if w in text) * 0.1
                 if keyword_score > 0:
                     scored.append((s, keyword_score))
 

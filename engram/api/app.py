@@ -28,8 +28,10 @@ from engram.api.schemas import (
     CommitResolutionRequest,
     ConflictResolutionRequest,
     DailyDigestResponse,
+    HandoffStatus,
     HandoffCheckpointRequest,
     HandoffResumeRequest,
+    HandoffSessionDigestRequest,
     NamespaceDeclareRequest,
     NamespacePermissionRequest,
     SceneSearchRequest,
@@ -50,6 +52,7 @@ class SearchResultResponse(BaseModel):
     results: List[Dict[str, Any]]
     count: int
     context_packet: Optional[Dict[str, Any]] = None
+    retrieval_trace: Optional[Dict[str, Any]] = None
 
 
 class StatsResponse(BaseModel):
@@ -248,8 +251,8 @@ async def list_handoff_lanes(
     http_request: Request,
     user_id: str = Query(default="default"),
     repo_path: Optional[str] = Query(default=None),
-    status: Optional[str] = Query(default=None),
-    statuses: Optional[List[str]] = Query(default=None),
+    status: Optional[HandoffStatus] = Query(default=None),
+    statuses: Optional[List[HandoffStatus]] = Query(default=None),
     limit: int = Query(default=20, ge=1, le=200),
     requester_agent_id: Optional[str] = Query(default=None),
 ):
@@ -268,6 +271,107 @@ async def list_handoff_lanes(
         return {"lanes": lanes, "count": len(lanes)}
     except PermissionError as exc:
         raise require_session_error(exc)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.post("/v1/handoff/sessions/digest")
+@app.post("/v1/handoff/sessions/digest/")
+async def save_handoff_session_digest(request: HandoffSessionDigestRequest, http_request: Request):
+    token = get_token_from_request(http_request)
+    kernel = get_kernel()
+    digest = {
+        "task_summary": request.task_summary,
+        "repo": request.repo,
+        "branch": request.branch,
+        "lane_id": request.lane_id,
+        "lane_type": request.lane_type,
+        "agent_role": request.agent_role,
+        "namespace": request.namespace,
+        "confidentiality_scope": request.confidentiality_scope,
+        "status": request.status,
+        "decisions_made": request.decisions_made,
+        "files_touched": request.files_touched,
+        "todos_remaining": request.todos_remaining,
+        "blockers": request.blockers,
+        "key_commands": request.key_commands,
+        "test_results": request.test_results,
+        "context_snapshot": request.context_snapshot,
+        "started_at": request.started_at,
+        "ended_at": request.ended_at,
+    }
+    try:
+        return kernel.save_session_digest(
+            user_id=request.user_id,
+            agent_id=request.agent_id,
+            digest=digest,
+            token=token,
+            requester_agent_id=request.requester_agent_id or request.agent_id,
+        )
+    except PermissionError as exc:
+        raise require_session_error(exc)
+
+
+@app.get("/v1/handoff/sessions/last")
+@app.get("/v1/handoff/sessions/last/")
+async def get_handoff_last_session(
+    http_request: Request,
+    user_id: str = Query(default="default"),
+    agent_id: Optional[str] = Query(default=None),
+    requester_agent_id: Optional[str] = Query(default=None),
+    repo: Optional[str] = Query(default=None),
+    statuses: Optional[List[HandoffStatus]] = Query(default=None),
+):
+    token = get_token_from_request(http_request)
+    kernel = get_kernel()
+    try:
+        session = kernel.get_last_session(
+            user_id=user_id,
+            agent_id=agent_id,
+            repo=repo,
+            statuses=statuses,
+            token=token,
+            requester_agent_id=requester_agent_id or agent_id,
+        )
+        if session:
+            return session
+        return {"error": "No sessions found"}
+    except PermissionError as exc:
+        raise require_session_error(exc)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
+
+
+@app.get("/v1/handoff/sessions")
+@app.get("/v1/handoff/sessions/")
+async def list_handoff_sessions(
+    http_request: Request,
+    user_id: str = Query(default="default"),
+    agent_id: Optional[str] = Query(default=None),
+    requester_agent_id: Optional[str] = Query(default=None),
+    repo: Optional[str] = Query(default=None),
+    status: Optional[HandoffStatus] = Query(default=None),
+    statuses: Optional[List[HandoffStatus]] = Query(default=None),
+    limit: int = Query(default=20, ge=1, le=200),
+):
+    token = get_token_from_request(http_request)
+    kernel = get_kernel()
+    try:
+        sessions = kernel.list_sessions(
+            user_id=user_id,
+            agent_id=agent_id,
+            repo=repo,
+            status=status,
+            statuses=statuses,
+            limit=limit,
+            token=token,
+            requester_agent_id=requester_agent_id or agent_id,
+        )
+        return {"sessions": sessions, "count": len(sessions)}
+    except PermissionError as exc:
+        raise require_session_error(exc)
+    except ValueError as exc:
+        raise HTTPException(status_code=400, detail=str(exc))
 
 
 @app.post("/v1/search", response_model=SearchResultResponse)
@@ -293,6 +397,7 @@ async def search_memories(request: SearchRequestV2, http_request: Request):
                 results=results,
                 count=len(results),
                 context_packet=payload.get("context_packet"),
+                retrieval_trace=payload.get("retrieval_trace"),
             )
         except PermissionError as exc:
             raise require_session_error(exc)
