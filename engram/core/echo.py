@@ -324,7 +324,7 @@ class EchoProcessor:
                 echo_depth=EchoDepth.MEDIUM,
                 strength_multiplier=self.STRENGTH_MULTIPLIERS[EchoDepth.MEDIUM],
             )
-        except Exception as e:
+        except (json.JSONDecodeError, ValueError, KeyError, AttributeError) as e:
             logger.warning(f"Medium echo failed, falling back to shallow: {e}")
             return self._shallow_echo(content)
 
@@ -357,7 +357,7 @@ class EchoProcessor:
                 echo_depth=EchoDepth.DEEP,
                 strength_multiplier=self.STRENGTH_MULTIPLIERS[EchoDepth.DEEP],
             )
-        except Exception as e:
+        except (json.JSONDecodeError, ValueError, KeyError, AttributeError) as e:
             logger.warning(f"Deep echo failed, falling back to medium: {e}")
             return self._medium_echo(content)
 

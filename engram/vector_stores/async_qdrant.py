@@ -5,9 +5,11 @@ Uses the async Qdrant client for native async operations.
 
 from __future__ import annotations
 
+import asyncio
 import uuid
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
+
+from engram.vector_stores.base import MemoryResult
 
 try:
     from qdrant_client import AsyncQdrantClient
@@ -15,14 +17,6 @@ try:
     HAS_QDRANT = True
 except ImportError:
     HAS_QDRANT = False
-
-
-@dataclass
-class MemoryResult:
-    """Result from a vector search."""
-    id: str
-    score: float = 0.0
-    payload: Dict[str, Any] = None
 
 
 class AsyncQdrantVectorStore:
@@ -153,20 +147,21 @@ class AsyncQdrantVectorStore:
             if conditions:
                 qdrant_filter = Filter(must=conditions)
 
-        results = await self.client.search(
+        response = await self.client.query_points(
             collection_name=self.collection_name,
-            query_vector=query_vector,
+            query=query_vector,
             limit=limit,
             query_filter=qdrant_filter,
+            with_payload=True,
         )
 
         return [
             MemoryResult(
                 id=str(r.id),
-                score=r.score,
+                score=float(r.score or 0.0),
                 payload=r.payload or {},
             )
-            for r in results
+            for r in response.points
         ]
 
     async def delete(self, ids: List[str]) -> None:

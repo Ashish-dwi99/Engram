@@ -112,7 +112,7 @@ class MemoryClient:
     def get_all(self, **kwargs) -> Dict[str, Any]:
         return self._request("GET", "/v1/memories/", params=kwargs)
 
-    def update(self, memory_id: str, data: str = None, metadata: Dict[str, Any] = None, **kwargs) -> Dict[str, Any]:
+    def update(self, memory_id: str, data: Optional[str] = None, metadata: Optional[Dict[str, Any]] = None, **kwargs) -> Dict[str, Any]:
         payload: Dict[str, Any] = {}
         if data is not None:
             payload["data"] = data

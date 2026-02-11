@@ -7,7 +7,8 @@ import pytest
 
 sqlite_vec = pytest.importorskip("sqlite_vec", reason="sqlite-vec not installed")
 
-from engram.vector_stores.sqlite_vec import SqliteVecStore, MemoryResult
+from engram.vector_stores.base import MemoryResult
+from engram.vector_stores.sqlite_vec import SqliteVecStore
 
 
 @pytest.fixture

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import uuid
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 
@@ -24,7 +24,7 @@ class StagingStore:
         status: str = "PENDING",
     ) -> Dict[str, Any]:
         commit_id = str(uuid.uuid4())
-        created_at = datetime.utcnow().isoformat()
+        created_at = datetime.now(timezone.utc).isoformat()
         payload = {
             "id": commit_id,
             "user_id": user_id,

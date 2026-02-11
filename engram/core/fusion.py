@@ -1,8 +1,11 @@
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from engram.utils.prompts import FUSION_PROMPT
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -14,7 +17,10 @@ class FusedMemory:
     layer: str = "lml"
 
 
-def fuse_memories(memories: List[Dict[str, Any]], llm, custom_prompt: Optional[str] = None) -> FusedMemory:
+def fuse_memories(memories: List[Dict[str, Any]], llm, custom_prompt: Optional[str] = None) -> Optional[FusedMemory]:
+    if not memories:
+        return None
+
     memories_text = "\n\n".join(
         [
             f"Memory {i + 1} (strength={m.get('strength', 1.0):.2f}, accessed={m.get('access_count', 0)}x, created_at={m.get('created_at', '')}):\n{m.get('memory', '')}"
@@ -28,11 +34,27 @@ def fuse_memories(memories: List[Dict[str, Any]], llm, custom_prompt: Optional[s
         response = llm.generate(prompt)
         data = json.loads(response.strip())
         fused_content = data.get("consolidated_memory", "")
-    except Exception:
+    except (json.JSONDecodeError, ValueError, TypeError) as e:
+        logger.warning("Fusion LLM parsing failed: %s", e)
+        fused_content = " | ".join([m.get("memory", "") for m in memories])
+    except Exception as e:
+        logger.warning("Fusion LLM call failed: %s", e)
         fused_content = " | ".join([m.get("memory", "") for m in memories])
 
-    avg_strength = sum(m.get("strength", 1.0) for m in memories) / len(memories)
-    total_access = sum(m.get("access_count", 0) for m in memories)
+    def _safe_float(val, default: float) -> float:
+        try:
+            return float(val)
+        except (ValueError, TypeError):
+            return default
+
+    def _safe_int(val, default: int) -> int:
+        try:
+            return int(val)
+        except (ValueError, TypeError):
+            return default
+
+    avg_strength = sum(_safe_float(m.get("strength", 1.0), 1.0) for m in memories) / len(memories)
+    total_access = sum(_safe_int(m.get("access_count", 0), 0) for m in memories)
 
     return FusedMemory(
         content=fused_content,

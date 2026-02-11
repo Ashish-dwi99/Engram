@@ -1,17 +1,9 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
 import uuid
 from typing import Any, Dict, List, Optional
 
-from engram.vector_stores.base import VectorStoreBase
-
-
-@dataclass
-class MemoryResult:
-    id: str
-    score: float = 0.0
-    payload: Dict[str, Any] = None
+from engram.vector_stores.base import MemoryResult, VectorStoreBase
 
 
 class QdrantVectorStore(VectorStoreBase):
@@ -101,7 +93,10 @@ class QdrantVectorStore(VectorStoreBase):
         if vector is not None:
             from qdrant_client.models import PointStruct
 
-            payload = payload or {}
+            # Preserve existing payload when only updating the vector
+            if payload is None:
+                existing = self.get(vector_id)
+                payload = existing.payload if existing else {}
             point = PointStruct(id=vector_id, vector=vector, payload=payload)
             self.client.upsert(collection_name=self.collection_name, points=[point])
             return
@@ -140,6 +135,14 @@ class QdrantVectorStore(VectorStoreBase):
     def reset(self) -> None:
         self.delete_col()
         self.create_col(self.collection_name, self.vector_size, self.distance)
+
+    def close(self) -> None:
+        """Close the Qdrant client connection."""
+        if hasattr(self, 'client') and self.client is not None:
+            try:
+                self.client.close()
+            except Exception:
+                pass
 
 
 def _create_client(config: Dict[str, Any]):

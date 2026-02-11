@@ -1312,6 +1312,52 @@ class PersonalMemoryKernel:
 
             if apply_decay:
                 user_stats["decay"] = self.memory.apply_decay(scope={"user_id": uid})
+
+            # CLS Distillation: replay distillation + trace cascade during sleep
+            distillation_config = getattr(self.memory.config, "distillation", None)
+            if distillation_config:
+                # Gap 2: Replay distillation
+                if distillation_config.enable_distillation:
+                    try:
+                        from engram.core.distillation import ReplayDistiller
+                        distiller = ReplayDistiller(
+                            db=self.db,
+                            llm=self.memory.llm,
+                            config=distillation_config,
+                        )
+                        user_stats["distillation"] = distiller.run(
+                            user_id=uid,
+                            date_str=target_date,
+                            memory_add_fn=self.memory.add,
+                        )
+                    except Exception as e:
+                        user_stats["distillation"] = {"error": str(e)}
+
+                # Gap 4: Cascade traces (deep sleep)
+                if distillation_config.enable_multi_trace:
+                    try:
+                        from engram.core.traces import cascade_traces, compute_effective_strength
+                        traced_memories = self.db.get_all_memories(
+                            user_id=uid,
+                        )
+                        cascade_count = 0
+                        for mem in traced_memories:
+                            if mem.get("s_fast") is None:
+                                continue
+                            s_f, s_m, s_s = cascade_traces(
+                                s_fast=float(mem.get("s_fast", 0.0)),
+                                s_mid=float(mem.get("s_mid", 0.0)),
+                                s_slow=float(mem.get("s_slow", 0.0)),
+                                config=distillation_config,
+                                deep_sleep=True,
+                            )
+                            eff = compute_effective_strength(s_f, s_m, s_s, distillation_config)
+                            self.db.update_multi_trace(mem["id"], s_f, s_m, s_s, eff)
+                            cascade_count += 1
+                        user_stats["trace_cascades"] = cascade_count
+                    except Exception as e:
+                        user_stats["trace_cascades"] = {"error": str(e)}
+
             summary["users"][uid] = user_stats
 
         if cleanup_stale_refs:

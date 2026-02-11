@@ -1,5 +1,14 @@
 from abc import ABC, abstractmethod
+from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
+
+
+@dataclass
+class MemoryResult:
+    """Standard result type returned by all vector store implementations."""
+    id: str
+    score: float = 0.0
+    payload: Dict[str, Any] = field(default_factory=dict)
 
 
 class VectorStoreBase(ABC):
@@ -45,4 +54,8 @@ class VectorStoreBase(ABC):
 
     @abstractmethod
     def reset(self) -> None:
+        pass
+
+    def close(self) -> None:
+        """Release resources. Override in subclasses that hold connections."""
         pass
