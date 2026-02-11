@@ -1,8 +1,11 @@
 import json
+import logging
 from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 from engram.utils.prompts import CONFLICT_RESOLUTION_PROMPT
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -26,13 +29,26 @@ def resolve_conflict(existing_memory: Dict[str, Any], new_content: str, llm, cus
     try:
         response = llm.generate(prompt)
         data = json.loads(response.strip())
+        try:
+            confidence = float(data.get("confidence", 0.5))
+        except (ValueError, TypeError):
+            confidence = 0.5
         return ConflictResolution(
             classification=data.get("classification", "COMPATIBLE"),
-            confidence=float(data.get("confidence", 0.5)),
+            confidence=min(1.0, max(0.0, confidence)),
             merged_content=data.get("merged_content"),
             explanation=data.get("explanation", ""),
         )
-    except Exception:
+    except (json.JSONDecodeError, ValueError, TypeError) as e:
+        logger.warning("Conflict resolution parsing failed: %s", e)
+        return ConflictResolution(
+            classification="COMPATIBLE",
+            confidence=0.5,
+            merged_content=None,
+            explanation="Failed to parse LLM response",
+        )
+    except Exception as e:
+        logger.warning("Conflict resolution failed: %s", e)
         return ConflictResolution(
             classification="COMPATIBLE",
             confidence=0.5,

@@ -15,20 +15,12 @@ import sqlite3
 import struct
 import threading
 import uuid
-from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 
 from engram.memory.utils import matches_filters
-from engram.vector_stores.base import VectorStoreBase
+from engram.vector_stores.base import MemoryResult, VectorStoreBase
 
 logger = logging.getLogger(__name__)
-
-
-@dataclass
-class MemoryResult:
-    id: str
-    score: float = 0.0
-    payload: Dict[str, Any] = None
 
 
 def _serialize_float32(vector: List[float]) -> bytes:
@@ -65,9 +57,10 @@ class SqliteVecStore(VectorStoreBase):
         self._conn = sqlite3.connect(db_path, check_same_thread=False)
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute("PRAGMA busy_timeout=5000")
-        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA synchronous=FULL")
         self._conn.row_factory = sqlite3.Row
         self._lock = threading.RLock()
+        self._closed = False
 
         # Load sqlite-vec extension
         self._conn.enable_load_extension(True)
@@ -113,6 +106,7 @@ class SqliteVecStore(VectorStoreBase):
                 self._conn.commit()
 
     def create_col(self, name: str, vector_size: int, distance: str = "cosine") -> None:
+        self._check_open()
         self._ensure_collection(name, vector_size)
 
     def insert(
@@ -121,12 +115,17 @@ class SqliteVecStore(VectorStoreBase):
         payloads: Optional[List[Dict[str, Any]]] = None,
         ids: Optional[List[str]] = None,
     ) -> None:
+        self._check_open()
         payloads = payloads or [{} for _ in vectors]
         if len(payloads) != len(vectors):
             raise ValueError("payloads length must match vectors length")
         if ids is not None and len(ids) != len(vectors):
             raise ValueError("ids length must match vectors length")
         ids = ids or [str(uuid.uuid4()) for _ in vectors]
+
+        for vector in vectors:
+            if len(vector) != self.vector_size:
+                raise ValueError(f"Vector has {len(vector)} dimensions, expected {self.vector_size}")
 
         vec_table = self._vec_table(self.collection_name)
         payload_table = self._payload_table(self.collection_name)
@@ -168,6 +167,7 @@ class SqliteVecStore(VectorStoreBase):
         limit: int = 5,
         filters: Optional[Dict[str, Any]] = None,
     ) -> List[MemoryResult]:
+        self._check_open()
         vec_table = self._vec_table(self.collection_name)
         payload_table = self._payload_table(self.collection_name)
 
@@ -229,6 +229,7 @@ class SqliteVecStore(VectorStoreBase):
         return results[:limit]
 
     def delete(self, vector_id: str) -> None:
+        self._check_open()
         payload_table = self._payload_table(self.collection_name)
         vec_table = self._vec_table(self.collection_name)
 
@@ -253,6 +254,7 @@ class SqliteVecStore(VectorStoreBase):
         vector: Optional[List[float]] = None,
         payload: Optional[Dict[str, Any]] = None,
     ) -> None:
+        self._check_open()
         payload_table = self._payload_table(self.collection_name)
         vec_table = self._vec_table(self.collection_name)
 
@@ -278,6 +280,7 @@ class SqliteVecStore(VectorStoreBase):
             self._conn.commit()
 
     def get(self, vector_id: str) -> Optional[MemoryResult]:
+        self._check_open()
         payload_table = self._payload_table(self.collection_name)
 
         with self._lock:
@@ -298,6 +301,7 @@ class SqliteVecStore(VectorStoreBase):
         return MemoryResult(id=row["uuid"], score=0.0, payload=payload)
 
     def list_cols(self) -> List[str]:
+        self._check_open()
         with self._lock:
             rows = self._conn.execute(
                 "SELECT name FROM sqlite_master WHERE type='table' AND name LIKE 'payload_%'",
@@ -305,6 +309,7 @@ class SqliteVecStore(VectorStoreBase):
         return [row["name"].replace("payload_", "", 1) for row in rows]
 
     def delete_col(self) -> None:
+        self._check_open()
         vec_table = self._vec_table(self.collection_name)
         payload_table = self._payload_table(self.collection_name)
 
@@ -314,6 +319,7 @@ class SqliteVecStore(VectorStoreBase):
             self._conn.commit()
 
     def col_info(self) -> Dict[str, Any]:
+        self._check_open()
         payload_table = self._payload_table(self.collection_name)
 
         with self._lock:
@@ -333,6 +339,7 @@ class SqliteVecStore(VectorStoreBase):
         filters: Optional[Dict[str, Any]] = None,
         limit: Optional[int] = None,
     ) -> List[MemoryResult]:
+        self._check_open()
         payload_table = self._payload_table(self.collection_name)
         effective_limit = limit or 100
 
@@ -358,5 +365,26 @@ class SqliteVecStore(VectorStoreBase):
         return results[:effective_limit]
 
     def reset(self) -> None:
+        self._check_open()
         self.delete_col()
         self._ensure_collection(self.collection_name, self.vector_size)
+
+    def _check_open(self) -> None:
+        """Raise if the store has been closed."""
+        if self._closed:
+            raise RuntimeError("SqliteVecStore is closed")
+
+    def close(self) -> None:
+        """Close the SQLite connection."""
+        with self._lock:
+            self._closed = True
+            if self._conn:
+                try:
+                    self._conn.execute("PRAGMA wal_checkpoint(RESTART)")
+                except Exception:
+                    pass
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None  # type: ignore[assignment]

@@ -3,7 +3,7 @@
 from enum import Enum
 from typing import Dict
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 
 class TTLTier(str, Enum):
@@ -25,6 +25,14 @@ class SignalScope(str, Enum):
     NAMESPACE = "namespace"  # Only agents in same namespace
 
 
+class ConsolidationConfig(BaseModel):
+    """Configuration for active → passive memory consolidation."""
+    promote_critical: bool = True
+    promote_high_read: bool = True
+    promote_read_threshold: int = 3
+    directive_to_passive: bool = True
+
+
 class ActiveMemoryConfig(BaseModel):
     """Configuration for the Active Memory signal bus."""
     enabled: bool = True
@@ -40,11 +48,18 @@ class ActiveMemoryConfig(BaseModel):
     consolidation_enabled: bool = True
     consolidation_min_age_seconds: int = 600
     consolidation_min_reads: int = 3
+    consolidation: ConsolidationConfig = Field(default_factory=ConsolidationConfig)
 
+    @field_validator("default_ttl_tier")
+    @classmethod
+    def _valid_ttl_tier(cls, v: str) -> str:
+        allowed = {t.value for t in TTLTier}
+        v = str(v).strip().lower()
+        if v not in allowed:
+            return TTLTier.NOTABLE.value
+        return v
 
-class ConsolidationConfig(BaseModel):
-    """Configuration for active → passive memory consolidation."""
-    promote_critical: bool = True
-    promote_high_read: bool = True
-    promote_read_threshold: int = 3
-    directive_to_passive: bool = True
+    @field_validator("max_signals_per_response")
+    @classmethod
+    def _clamp_max_signals(cls, v: int) -> int:
+        return min(100, max(1, int(v)))

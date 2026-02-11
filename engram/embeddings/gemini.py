@@ -1,7 +1,10 @@
+import logging
 import os
 from typing import List, Optional
 
 from engram.embeddings.base import BaseEmbedder
+
+logger = logging.getLogger(__name__)
 
 
 class GeminiEmbedder(BaseEmbedder):
@@ -23,7 +26,7 @@ class GeminiEmbedder(BaseEmbedder):
             genai.configure(api_key=self.api_key)
             self._client_type = "generativeai"
             self._genai = genai
-        except Exception:
+        except ImportError:
             try:
                 from google import genai
 
@@ -35,27 +38,37 @@ class GeminiEmbedder(BaseEmbedder):
                 ) from exc
 
     def embed(self, text: str, memory_action: Optional[str] = None) -> List[float]:
-        if self._client_type == "generativeai":
-            response = self._genai.embed_content(
-                model=self.model,
-                content=text,
-            )
-            embedding = response.get("embedding") if isinstance(response, dict) else getattr(response, "embedding", None)
-            return embedding or []
+        try:
+            if self._client_type == "generativeai":
+                response = self._genai.embed_content(
+                    model=self.model,
+                    content=text,
+                )
+                embedding = response.get("embedding") if isinstance(response, dict) else getattr(response, "embedding", None)
+                if not embedding:
+                    raise RuntimeError(f"Gemini embedding returned empty result (model={self.model})")
+                return embedding
 
-        if self._client_type == "genai":
-            response = self._client.models.embed_content(
-                model=self.model,
-                contents=text,
-            )
-            return _extract_embedding_from_response(response)
+            if self._client_type == "genai":
+                response = self._client.models.embed_content(
+                    model=self.model,
+                    contents=text,
+                )
+                return _extract_embedding_from_response(response)
 
-        return []
+            raise RuntimeError("Gemini embedder not initialized")
+        except RuntimeError:
+            raise
+        except Exception as exc:
+            logger.error("Gemini embedding failed (model=%s): %s", self.model, exc)
+            raise RuntimeError(
+                f"Gemini embedding failed (model={self.model}): {exc}"
+            ) from exc
 
 
 def _extract_embedding_from_response(response) -> List[float]:
     if response is None:
-        return []
+        raise RuntimeError("Gemini embedding response was None")
     embedding = getattr(response, "embedding", None)
     if embedding:
         return embedding
@@ -65,4 +78,4 @@ def _extract_embedding_from_response(response) -> List[float]:
         vector = getattr(first, "values", None) or getattr(first, "embedding", None)
         if vector:
             return vector
-    return []
+    raise RuntimeError("Gemini embedding response contained no embedding data")

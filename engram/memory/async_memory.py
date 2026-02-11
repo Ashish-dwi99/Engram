@@ -104,6 +104,8 @@ class AsyncMemory:
         """Close all connections."""
         if self._vector_store:
             await self._vector_store.close()
+        if self._db:
+            await self._db.close()
 
     @classmethod
     async def from_config(cls, config_dict: Dict[str, Any]) -> "AsyncMemory":

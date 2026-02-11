@@ -20,9 +20,10 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import uuid
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, List, Optional, Set, Tuple
 
@@ -59,7 +60,7 @@ class Category:
     total_strength: float = 0.0  # Sum of all memory strengths
     access_count: int = 0
     last_accessed: Optional[str] = None
-    created_at: str = field(default_factory=lambda: datetime.utcnow().isoformat())
+    created_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
 
     # Semantic representation
     embedding: Optional[List[float]] = None  # Category's semantic vector
@@ -109,7 +110,7 @@ class Category:
             total_strength=data.get("total_strength", 0.0),
             access_count=data.get("access_count", 0),
             last_accessed=data.get("last_accessed"),
-            created_at=data.get("created_at", datetime.utcnow().isoformat()),
+            created_at=data.get("created_at", datetime.now(timezone.utc).isoformat()),
             embedding=data.get("embedding"),
             keywords=data.get("keywords", []),
             summary=data.get("summary"),
@@ -380,7 +381,10 @@ class CategoryProcessor:
         if norm1 == 0 or norm2 == 0:
             return 0.0
 
-        return dot_product / (norm1 * norm2)
+        result = dot_product / (norm1 * norm2)
+        if math.isnan(result) or math.isinf(result):
+            return 0.0
+        return result
 
     def _llm_detect_category(
         self,
@@ -511,7 +515,7 @@ class CategoryProcessor:
 
         cat = self.categories[category_id]
         cat.access_count += 1
-        cat.last_accessed = datetime.utcnow().isoformat()
+        cat.last_accessed = datetime.now(timezone.utc).isoformat()
 
         # Strengthen category on access (bio-inspired)
         cat.strength = min(1.0, cat.strength + 0.02)
@@ -541,7 +545,7 @@ class CategoryProcessor:
         try:
             summary = self.llm.generate(prompt)
             cat.summary = summary.strip()
-            cat.summary_updated_at = datetime.utcnow().isoformat()
+            cat.summary_updated_at = datetime.now(timezone.utc).isoformat()
             return cat.summary
         except Exception as e:
             logger.warning(f"Summary generation failed for {category_id}: {e}")
@@ -575,12 +579,15 @@ class CategoryProcessor:
             if cat.last_accessed:
                 try:
                     last_access = datetime.fromisoformat(cat.last_accessed)
-                    days_since = (datetime.utcnow() - last_access).days
+                    if last_access.tzinfo is None:
+                        last_access = last_access.replace(tzinfo=timezone.utc)
+                    days_since = (datetime.now(timezone.utc) - last_access).days
                     decay_amount = decay_rate * (days_since / 7)  # Weekly decay
                     cat.strength = max(0.1, cat.strength - decay_amount)
                     decayed += 1
-                except Exception:
-                    pass
+                except (ValueError, TypeError) as e:
+                    logger.debug(f"Category decay calculation failed for {cat.id}: {e}")
+                    continue
 
             # Track weak categories for potential merging
             if cat.strength < 0.3 and cat.memory_count < 3:
@@ -623,8 +630,9 @@ class CategoryProcessor:
             # Check keyword overlap
             if weak_cat.keywords and cat.keywords:
                 overlap = len(set(weak_cat.keywords) & set(cat.keywords))
-                if overlap >= 2:
-                    if not best_target or overlap / len(weak_cat.keywords) > best_similarity:
+                kw_count = len(weak_cat.keywords)
+                if overlap >= 2 and kw_count > 0:
+                    if not best_target or overlap / kw_count > best_similarity:
                         best_target = cat
 
         return best_target
@@ -660,7 +668,14 @@ class CategoryProcessor:
         logger.info(f"Merged category {source_id} into {target_id}")
 
     def find_related_categories(self, category_id: str, limit: int = 3) -> List[str]:
-        """Find categories related to the given one."""
+        """Find categories related to the given one.
+
+        Note: This is O(N * D) where N is the number of categories and D is the
+        embedding dimensionality, because it computes cosine similarity against
+        every category. For very large category counts this could become a
+        bottleneck; consider caching related_ids or using an approximate
+        nearest-neighbor index if N grows large.
+        """
         if category_id not in self.categories:
             return []
 

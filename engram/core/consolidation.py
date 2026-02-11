@@ -10,7 +10,7 @@ Mirrors how the brain consolidates short-term memory into long-term during rest:
 import logging
 from typing import Any, Dict, TYPE_CHECKING
 
-from engram.configs.active import ActiveMemoryConfig, ConsolidationConfig
+from engram.configs.active import ActiveMemoryConfig
 from engram.core.active_memory import ActiveMemoryStore
 
 if TYPE_CHECKING:
@@ -31,7 +31,7 @@ class ConsolidationEngine:
         self.active = active_store
         self.memory = memory
         self.config = config
-        self.consolidation = ConsolidationConfig()
+        self.consolidation = config.consolidation
 
     def run_cycle(self) -> Dict[str, Any]:
         """Run one consolidation cycle. Returns promotion stats."""

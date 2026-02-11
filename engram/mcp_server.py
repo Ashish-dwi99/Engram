@@ -166,13 +166,16 @@ _lifecycle_lock = threading.Lock()
 _lifecycle_state: Dict[str, Dict[str, Any]] = {}
 _idle_pause_seconds = max(1, int(os.environ.get("ENGRAM_MCP_IDLE_PAUSE_SECONDS", "300")))
 _shutdown_hooks_registered = False
+_shutdown_requested = False
 
 
 def get_memory() -> Memory:
     """Get or create the global memory instance."""
     global _memory
     if _memory is None:
-        _memory = get_memory_instance()
+        with _lifecycle_lock:
+            if _memory is None:
+                _memory = get_memory_instance()
     return _memory
 
 
@@ -185,7 +188,9 @@ def get_handoff_backend(memory: Memory):
     """Get or create the configured handoff backend."""
     global _handoff_backend
     if _handoff_backend is None:
-        _handoff_backend = create_handoff_backend(memory)
+        with _lifecycle_lock:
+            if _handoff_backend is None:
+                _handoff_backend = create_handoff_backend(memory)
     return _handoff_backend
 
 
@@ -200,6 +205,30 @@ def _merge_handoff_context(existing: Dict[str, Any], update: Dict[str, Any]) -> 
         if value is not None:
             merged[key] = value
     return merged
+
+
+_LIFECYCLE_MAX_ENTRIES = 500
+_LIFECYCLE_MAX_AGE_SECONDS = 86400  # 24 hours
+
+
+def _gc_lifecycle_state_locked() -> None:
+    """Evict stale runtime entries from _lifecycle_state. Called under _lifecycle_lock.
+
+    NOTE: This only cleans ephemeral in-process handoff context, NOT persistent
+    memory data. Actual memories are safely stored in SQLite and vector stores.
+    """
+    now = time.time()
+    expired = [k for k, v in _lifecycle_state.items()
+               if now - v.get("last_activity_ts", 0) > _LIFECYCLE_MAX_AGE_SECONDS]
+    for k in expired:
+        del _lifecycle_state[k]
+    if len(_lifecycle_state) > _LIFECYCLE_MAX_ENTRIES:
+        sorted_keys = sorted(
+            _lifecycle_state,
+            key=lambda k: _lifecycle_state[k].get("last_activity_ts", 0),
+        )
+        for k in sorted_keys[:len(_lifecycle_state) - _LIFECYCLE_MAX_ENTRIES]:
+            del _lifecycle_state[k]
 
 
 def _record_handoff_context(context: Dict[str, Any]) -> None:
@@ -229,6 +258,9 @@ def _record_handoff_context(context: Dict[str, Any]) -> None:
         merged = _merge_handoff_context(existing, context)
         merged["last_activity_ts"] = now_ts
         _lifecycle_state[key] = merged
+        # Periodic cleanup to prevent unbounded growth
+        if len(_lifecycle_state) > _LIFECYCLE_MAX_ENTRIES:
+            _gc_lifecycle_state_locked()
 
 
 def _emit_lifecycle_checkpoint(memory: Memory, context: Dict[str, Any], *, event_type: str, task_summary: Optional[str]) -> Dict[str, Any]:
@@ -266,8 +298,14 @@ def _flush_agent_end_checkpoints() -> None:
         memory = get_memory()
     except Exception:
         return
-    with _lifecycle_lock:
+    # Use non-blocking acquire so we never deadlock if a signal fired while
+    # the lock was already held on the same thread (atexit runs in-process).
+    acquired = _lifecycle_lock.acquire(blocking=False)
+    try:
         contexts = list(_lifecycle_state.values())
+    finally:
+        if acquired:
+            _lifecycle_lock.release()
     for context in contexts:
         try:
             _emit_lifecycle_checkpoint(
@@ -287,10 +325,11 @@ def _register_shutdown_hooks() -> None:
     atexit.register(_flush_agent_end_checkpoints)
 
     def _signal_handler(signum, _frame):  # pragma: no cover - signal path
-        try:
-            _flush_agent_end_checkpoints()
-        finally:
-            raise SystemExit(0)
+        # Set a flag instead of acquiring _lifecycle_lock directly to avoid
+        # deadlock if the signal fires while _lifecycle_lock is already held.
+        global _shutdown_requested
+        _shutdown_requested = True
+        raise SystemExit(0)
 
     for sig_name in ("SIGTERM", "SIGINT"):
         sig_value = getattr(signal, sig_name, None)
@@ -1241,7 +1280,10 @@ def _handle_apply_memory_decay(memory: "Memory", arguments: Dict[str, Any], _ses
 @_tool_handler("engram_context")
 def _handle_engram_context(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
     user_id = arguments.get("user_id", "default")
-    limit = arguments.get("limit", 15)
+    try:
+        limit = max(1, min(100, int(arguments.get("limit", 15))))
+    except (ValueError, TypeError):
+        limit = 15
     all_result = memory.get_all(user_id=user_id, limit=limit * 3)
     all_memories = all_result.get("results", [])
     layer_order = {"lml": 0, "sml": 1}
@@ -1296,7 +1338,10 @@ def _handle_list_profiles(memory: "Memory", arguments: Dict[str, Any], _session_
 def _handle_search_profiles(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
     query = arguments.get("query", "")
     user_id = arguments.get("user_id", "default")
-    limit = arguments.get("limit", 10)
+    try:
+        limit = max(1, min(100, int(arguments.get("limit", 10))))
+    except (ValueError, TypeError):
+        limit = 10
     profiles = memory.search_profiles(query=query, user_id=user_id, limit=limit)
     return {
         "profiles": [
@@ -1349,7 +1394,10 @@ def _handle_search_memory(memory: "Memory", arguments: Dict[str, Any], _session_
     query = arguments.get("query", "")
     user_id = arguments.get("user_id", "default")
     agent_id = arguments.get("agent_id")
-    limit = arguments.get("limit", 10)
+    try:
+        limit = max(1, min(1000, int(arguments.get("limit", 10))))
+    except (ValueError, TypeError):
+        limit = 10
     categories = arguments.get("categories")
     if agent_id:
         token = _session_token(user_id=user_id, agent_id=agent_id, capabilities=["search"])
@@ -1382,10 +1430,14 @@ def _handle_search_memory(memory: "Memory", arguments: Dict[str, Any], _session_
 
 @_tool_handler("get_all_memories")
 def _handle_get_all_memories(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    try:
+        limit = max(1, min(1000, int(arguments.get("limit", 50))))
+    except (ValueError, TypeError):
+        limit = 50
     result = memory.get_all(
         user_id=arguments.get("user_id", "default"),
         agent_id=arguments.get("agent_id"),
-        limit=arguments.get("limit", 50),
+        limit=limit,
         layer=arguments.get("layer"),
     )
     if "results" in result:
@@ -1433,7 +1485,8 @@ def _handle_list_pending_commits(memory: "Memory", arguments: Dict[str, Any], _s
     token = _session_token(user_id=user_id, agent_id=agent_id, capabilities=["review_commits"])
     return memory.list_pending_commits(
         user_id=user_id, agent_id=agent_id, token=token,
-        status=arguments.get("status"), limit=arguments.get("limit", 100),
+        status=arguments.get("status"),
+        limit=max(1, min(1000, int(arguments.get("limit", 100)))) if arguments.get("limit") is not None else 100,
     )
 
 
@@ -1567,12 +1620,16 @@ def _handle_get_scene(memory: "Memory", arguments: Dict[str, Any], _session_toke
 
 @_tool_handler("list_scenes")
 def _handle_list_scenes(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    try:
+        scene_limit = max(1, min(200, int(arguments.get("limit", 20))))
+    except (ValueError, TypeError):
+        scene_limit = 20
     scenes = memory.get_scenes(
         user_id=arguments.get("user_id", "default"),
         topic=arguments.get("topic"),
         start_after=arguments.get("start_after"),
         start_before=arguments.get("start_before"),
-        limit=arguments.get("limit", 20),
+        limit=scene_limit,
     )
     return {
         "scenes": [
@@ -1596,10 +1653,14 @@ def _handle_search_scenes(memory: "Memory", arguments: Dict[str, Any], _session_
     user_id = arguments.get("user_id", "default")
     agent_id = arguments.get("agent_id", "claude-code")
     token = _session_token(user_id=user_id, agent_id=agent_id, capabilities=["read_scene"])
+    try:
+        scene_search_limit = max(1, min(100, int(arguments.get("limit", 10))))
+    except (ValueError, TypeError):
+        scene_search_limit = 10
     payload = memory.kernel.search_scenes(
         query=arguments.get("query", ""),
         user_id=user_id, agent_id=agent_id, token=token,
-        limit=arguments.get("limit", 10),
+        limit=scene_search_limit,
     )
     scenes = payload.get("scenes", [])
     return {
@@ -1623,30 +1684,53 @@ def _handle_search_scenes(memory: "Memory", arguments: Dict[str, Any], _session_
 # ---- Active Memory (signal bus) helpers and handlers ----
 
 _active_store = None
+_active_store_lock = threading.Lock()
 
 
 def _get_active_store(memory: Memory):
     """Lazy-initialize the global active memory store."""
     global _active_store
     if _active_store is None:
-        if memory.config.active.enabled:
-            from engram.core.active_memory import ActiveMemoryStore
-            _active_store = ActiveMemoryStore(memory.config.active)
+        with _active_store_lock:
+            if _active_store is None:
+                if memory.config.active.enabled:
+                    from engram.core.active_memory import ActiveMemoryStore
+                    _active_store = ActiveMemoryStore(memory.config.active)
     return _active_store
 
 
 @_tool_handler("signal_write")
 def _handle_signal_write(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    # Validate required fields
+    key = arguments.get("key")
+    if key is None or not isinstance(key, str) or not key.strip():
+        return {"error": "signal_write requires 'key' parameter"}
+    value = arguments.get("value")
+    if value is None or not isinstance(value, str):
+        return {"error": "signal_write requires 'value' parameter (string)"}
+
+    # Validate signal_type enum
+    _VALID_SIGNAL_TYPES = {"state", "event", "directive"}
+    signal_type = arguments.get("signal_type", "state")
+    if signal_type not in _VALID_SIGNAL_TYPES:
+        return {"error": f"signal_write 'signal_type' must be one of {sorted(_VALID_SIGNAL_TYPES)}, got '{signal_type}'"}
+
+    # Validate ttl_tier enum
+    _VALID_TTL_TIERS = {"noise", "notable", "critical", "directive"}
+    ttl_tier = arguments.get("ttl_tier", "notable")
+    if ttl_tier not in _VALID_TTL_TIERS:
+        return {"error": f"signal_write 'ttl_tier' must be one of {sorted(_VALID_TTL_TIERS)}, got '{ttl_tier}'"}
+
     active = _get_active_store(memory)
     if not active:
         return {"error": "Active memory is disabled"}
     return active.write_signal(
-        key=arguments["key"],
-        value=arguments["value"],
-        signal_type=arguments.get("signal_type", "state"),
+        key=key,
+        value=value,
+        signal_type=signal_type,
         scope=arguments.get("scope", "global"),
         scope_key=arguments.get("scope_key"),
-        ttl_tier=arguments.get("ttl_tier", "notable"),
+        ttl_tier=ttl_tier,
         source_agent_id=arguments.get("agent_id"),
         user_id=arguments.get("user_id", "default"),
     )
@@ -1657,18 +1741,32 @@ def _handle_signal_read(memory: "Memory", arguments: Dict[str, Any], _session_to
     active = _get_active_store(memory)
     if not active:
         return {"error": "Active memory is disabled"}
+    raw_limit = arguments.get("limit")
+    if raw_limit is not None:
+        try:
+            limit = max(1, min(1000, int(raw_limit)))
+        except (ValueError, TypeError):
+            limit = None
+    else:
+        limit = None
     return active.read_signals(
         scope=arguments.get("scope"),
         scope_key=arguments.get("scope_key"),
         signal_type=arguments.get("signal_type"),
         user_id=arguments.get("user_id", "default"),
         reader_agent_id=arguments.get("agent_id"),
-        limit=arguments.get("limit"),
+        limit=limit,
     )
 
 
 @_tool_handler("signal_clear")
 def _handle_signal_clear(memory: "Memory", arguments: Dict[str, Any], _session_token, _preview) -> Any:
+    # Validate signal_type enum if provided
+    _VALID_SIGNAL_TYPES = {"state", "event", "directive"}
+    signal_type = arguments.get("signal_type")
+    if signal_type is not None and signal_type not in _VALID_SIGNAL_TYPES:
+        return {"error": f"signal_clear 'signal_type' must be one of {sorted(_VALID_SIGNAL_TYPES)}, got '{signal_type}'"}
+
     active = _get_active_store(memory)
     if not active:
         return {"error": "Active memory is disabled"}
@@ -1677,7 +1775,7 @@ def _handle_signal_clear(memory: "Memory", arguments: Dict[str, Any], _session_t
         scope=arguments.get("scope"),
         scope_key=arguments.get("scope_key"),
         source_agent_id=arguments.get("agent_id"),
-        signal_type=arguments.get("signal_type"),
+        signal_type=signal_type,
         user_id=arguments.get("user_id", "default"),
     )
 
@@ -1900,7 +1998,7 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                     repo=arguments.get("repo"),
                     status=arguments.get("status"),
                     statuses=arguments.get("statuses"),
-                    limit=arguments.get("limit", 20),
+                    limit=max(1, min(200, int(arguments.get("limit", 20)))) if arguments.get("limit") is not None else 20,
                 )
                 result = {
                     "sessions": [
@@ -1993,25 +2091,29 @@ async def call_tool(name: str, arguments: Dict[str, Any]) -> List[TextContent]:
                 handoff_meta["resume"] = auto_resume_packet
             result["_handoff"] = handoff_meta
 
-        # Active memory auto-injection: attach latest signals to every response
+        # Active memory auto-injection: attach latest signals to every response.
+        # Use peek_signals (read-only) to avoid inflating read_count on every
+        # tool call; only explicit signal_read calls should bump the counter.
         if isinstance(result, dict):
             active_store = _get_active_store(memory)
             if active_store:
                 try:
-                    signals = active_store.read_signals(
+                    signals = active_store.peek_signals(
                         user_id=arguments.get("user_id", "default"),
-                        reader_agent_id=arguments.get("agent_id"),
                         limit=memory.config.active.max_signals_per_response,
                     )
                     if signals:
                         result["_active"] = signals
-                except Exception:
-                    pass  # Never break tool responses for active memory errors
+                except Exception as active_err:
+                    logger.debug("Active memory injection failed: %s", active_err)
 
         return [TextContent(type="text", text=json.dumps(result, indent=2, default=str))]
 
     except Exception as e:
-        error_result = {"error": str(e)}
+        logger.exception("MCP tool '%s' failed", name)
+        # Sanitize error — only expose the exception class name + message, not internals
+        error_msg = f"{type(e).__name__}: {e}"
+        error_result = {"error": error_msg}
         return [TextContent(type="text", text=json.dumps(error_result, indent=2))]
 
 

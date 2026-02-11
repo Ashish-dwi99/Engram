@@ -93,7 +93,7 @@ class HandoffSessionDigestRequest(BaseModel):
 
 
 class SearchRequestV2(BaseModel):
-    query: str
+    query: str = Field(min_length=1, max_length=10000)
     user_id: str = Field(default="default")
     agent_id: Optional[str] = Field(default=None)
     limit: int = Field(default=10, ge=1, le=100)
@@ -101,7 +101,7 @@ class SearchRequestV2(BaseModel):
 
 
 class AddMemoryRequestV2(BaseModel):
-    content: Optional[str] = Field(default=None)
+    content: Optional[str] = Field(default=None, max_length=100000)
     messages: Optional[Union[str, List[Dict[str, Any]]]] = Field(default=None)
     user_id: str = Field(default="default")
     agent_id: Optional[str] = Field(default=None)
@@ -109,7 +109,7 @@ class AddMemoryRequestV2(BaseModel):
     categories: Optional[List[str]] = Field(default=None)
     scope: Optional[str] = Field(default="work")
     namespace: Optional[str] = Field(default="default")
-    mode: str = Field(default="staging", description="staging|direct")
+    mode: Literal["staging", "direct"] = Field(default="staging", description="staging|direct")
     infer: bool = Field(default=False)
     source_app: Optional[str] = Field(default=None)
     source_type: str = Field(default="rest")
@@ -117,7 +117,7 @@ class AddMemoryRequestV2(BaseModel):
 
 
 class SceneSearchRequest(BaseModel):
-    query: str
+    query: str = Field(min_length=1, max_length=10000)
     user_id: str = Field(default="default")
     agent_id: Optional[str] = Field(default=None)
     limit: int = Field(default=10, ge=1, le=100)

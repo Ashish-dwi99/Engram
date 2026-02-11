@@ -78,6 +78,8 @@ class HandoffSessionBus:
             fallback=["active", "paused"],
         )
         self.lane_inactivity_minutes = int(cfg.get("lane_inactivity_minutes", 240))
+        # Cache bootstrapped policies per-instance to avoid a DB query on every checkpoint/resume.
+        self._bootstrapped_policies: set = set()
         self.auto_trusted_agents = {
             str(agent).strip().lower()
             for agent in cfg.get(
@@ -567,9 +569,6 @@ class HandoffSessionBus:
     # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
-
-    # Cache bootstrapped policies to avoid a DB query on every checkpoint/resume.
-    _bootstrapped_policies: set = set()
 
     def _bootstrap_auto_trusted_policy(self, *, user_id: str, agent_id: Optional[str], namespace: str) -> None:
         if not self.allow_auto_trusted_bootstrap:

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 
 
@@ -39,7 +39,7 @@ class EpisodicStore:
         timestamp: Optional[str] = None,
     ) -> Dict[str, Any]:
         metadata = metadata or {}
-        timestamp = timestamp or datetime.utcnow().isoformat()
+        timestamp = timestamp or datetime.now(timezone.utc).isoformat()
         namespace = str(metadata.get("namespace", "default") or "default").strip() or "default"
         place_type, place_value = self._extract_place(metadata)
         topic_label = self._extract_topic(content)

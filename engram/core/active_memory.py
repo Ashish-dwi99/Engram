@@ -170,8 +170,6 @@ class ActiveMemoryStore:
         limit: Optional[int] = None,
     ) -> List[Dict[str, Any]]:
         """Read active signals, auto-GC expired, increment read counts."""
-        self.gc_expired()
-
         conditions = ["user_id = ?"]
         params: List[Any] = [user_id]
 
@@ -189,6 +187,13 @@ class ActiveMemoryStore:
         effective_limit = limit or self.config.max_signals_per_response
 
         with self._get_connection() as conn:
+            # GC expired signals atomically within the same connection context
+            now = _utcnow_iso()
+            conn.execute(
+                "DELETE FROM signals WHERE expires_at IS NOT NULL AND expires_at < ? AND signal_type != 'directive'",
+                (now,),
+            )
+
             rows = conn.execute(
                 f"""SELECT * FROM signals WHERE {where}
                     ORDER BY
@@ -226,7 +231,72 @@ class ActiveMemoryStore:
                         "UPDATE signals SET read_count = read_count + 1, read_by = ? WHERE id = ?",
                         (json.dumps(signal["read_by"]), signal["id"]),
                     )
-                conn.commit()
+            conn.commit()
+
+        return results
+
+    def peek_signals(
+        self,
+        *,
+        scope: Optional[str] = None,
+        scope_key: Optional[str] = None,
+        signal_type: Optional[str] = None,
+        user_id: str = "default",
+        limit: Optional[int] = None,
+    ) -> List[Dict[str, Any]]:
+        """Read active signals without incrementing read_count or tracking readers.
+
+        Identical to ``read_signals`` but read-only — no writes are issued,
+        making it safe for automatic injection paths that should not inflate
+        read counts.
+        """
+        conditions = ["user_id = ?"]
+        params: List[Any] = [user_id]
+
+        if scope:
+            conditions.append("scope = ?")
+            params.append(scope)
+        if scope_key is not None:
+            conditions.append("scope_key = ?")
+            params.append(scope_key)
+        if signal_type:
+            conditions.append("signal_type = ?")
+            params.append(signal_type)
+
+        where = " AND ".join(conditions)
+        effective_limit = limit or self.config.max_signals_per_response
+
+        with self._get_connection() as conn:
+            # GC expired signals atomically within the same connection context
+            now = _utcnow_iso()
+            conn.execute(
+                "DELETE FROM signals WHERE expires_at IS NOT NULL AND expires_at < ? AND signal_type != 'directive'",
+                (now,),
+            )
+            conn.commit()
+
+            rows = conn.execute(
+                f"""SELECT * FROM signals WHERE {where}
+                    ORDER BY
+                        CASE ttl_tier
+                            WHEN 'directive' THEN 0
+                            WHEN 'critical' THEN 1
+                            WHEN 'notable' THEN 2
+                            WHEN 'noise' THEN 3
+                        END,
+                        created_at DESC
+                    LIMIT ?""",
+                params + [effective_limit],
+            ).fetchall()
+
+            results = []
+            for row in rows:
+                signal = dict(row)
+                try:
+                    signal["read_by"] = json.loads(signal.get("read_by", "[]"))
+                except (json.JSONDecodeError, TypeError):
+                    signal["read_by"] = []
+                results.append(signal)
 
         return results
 

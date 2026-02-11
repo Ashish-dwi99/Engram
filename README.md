@@ -55,6 +55,9 @@ But Engram isn't just a handoff bus. It solves four fundamental problems with ho
 | **Nobody forgets** | Store everything forever | **Ebbinghaus decay curve, ~45% less storage** |
 | **Agents write with no oversight** | Store directly | **Staging + verification + trust scoring** |
 | **No episodic memory** | Vector search only | **CAST scenes (time/place/topic)** |
+| **No consolidation** | Store everything as-is | **CLS Distillation — replay-driven fact extraction** |
+| **Single decay rate** | One exponential curve | **Multi-trace Benna-Fusi model (fast/mid/slow)** |
+| **No intent routing** | Same search for all queries | **Episodic vs semantic query classification** |
 | Multi-modal encoding | Single embedding | **5 retrieval paths (EchoMem)** |
 | Cross-agent memory sharing | Per-agent silos | **Scoped retrieval with all-but-mask privacy** |
 | Concurrent multi-agent access | Single-process locks | **sqlite-vec WAL mode — multiple agents, one DB** |
@@ -89,6 +92,9 @@ pip install "engram-memory[sqlite_vec]"
 
 # OpenAI provider add-on
 pip install "engram-memory[openai]"
+
+# NVIDIA provider add-on (Llama 3.1, nv-embed-v1, etc.)
+pip install "engram-memory[nvidia]"
 
 # Ollama provider add-on
 pip install "engram-memory[ollama]"
@@ -144,7 +150,7 @@ Engram has five opinions about how memory should work:
 
 1. **Switching agents shouldn't mean starting over.** When an agent pauses — rate limit, crash, tool switch — it saves a session digest. The next agent loads it and continues. Zero re-explanation.
 2. **Agents need shared real-time state.** Active Memory lets agents broadcast what they're doing right now — no polling, no coordination protocol. Agent A posts "editing auth.py"; Agent B sees it instantly.
-3. **Memory has a lifecycle.** New memories start in short-term (SML), get promoted to long-term (LML) through repeated access, and fade away through Ebbinghaus decay if unused.
+3. **Memory has a lifecycle.** New memories start in short-term (SML), get promoted to long-term (LML) through repeated access, and fade away through Ebbinghaus decay if unused. Sleep cycles distill episodic conversations into durable semantic facts (CLS consolidation), cascade strength traces from fast to slow, and prune redundant or contradictory memories.
 4. **Agents are untrusted writers.** Every write is a proposal that lands in staging. Trusted agents can auto-merge; untrusted ones wait for approval.
 5. **Scoping is mandatory.** Every memory is scoped by user. Agents see only what they're allowed to — everything else gets the "all but mask" treatment (structure visible, details redacted).
 
@@ -209,7 +215,7 @@ Engram has five opinions about how memory should work:
 
 ### The Memory Stack
 
-Engram combines seven systems, each handling a different aspect of how memory should work:
+Engram combines multiple systems, each handling a different aspect of how memory should work:
 
 #### Active Memory — Real-Time Signal Bus
 
@@ -287,6 +293,48 @@ Scene: "Engram v2 architecture session"
   Synopsis:   "Designed staged writes and scoped retrieval..."
   Views:      [view_1, view_2, view_3]
   Memories:   [mem_1, mem_2]  ← semantic facts extracted
+```
+
+#### CLS Distillation Memory — Bio-Inspired Consolidation (v1.4)
+
+Inspired by Complementary Learning Systems (CLS) theory — how the hippocampus and neocortex work together in the brain. Engram v1.4 adds five mechanisms that make memory smarter over time:
+
+**1. Episodic/Semantic Memory Types**
+Conversations are stored as `episodic` memories. During sleep cycles, a replay-driven distiller extracts durable facts into `semantic` memories — just like how your brain consolidates experiences into knowledge overnight.
+
+**2. Replay-Driven Distillation**
+The `ReplayDistiller` samples recent episodic memories, groups them by scene/time, and uses the LLM to extract reusable semantic facts. Every distilled fact links back to its source episodes (provenance tracking).
+
+**3. Multi-Mechanism Forgetting**
+Beyond simple exponential decay, Engram now has three advanced forgetting mechanisms:
+- **Interference Pruning** — contradictory memories are detected and the weaker one is demoted
+- **Redundancy Collapse** — near-duplicate memories are auto-fused
+- **Homeostatic Normalization** — memory budgets per namespace prevent unbounded growth
+
+**4. Multi-Timescale Strength Traces (Benna-Fusi Model)**
+Each memory has three strength traces instead of one scalar:
+```
+s_fast  (decay: 0.20/day) — recent access, volatile
+s_mid   (decay: 0.05/day) — medium-term consolidation
+s_slow  (decay: 0.005/day) — durable long-term knowledge
+```
+New memories start in `s_fast`. Sleep cycles cascade strength: `fast → mid → slow`. Important facts become nearly permanent.
+
+**5. Intent-Aware Retrieval Routing**
+Queries are classified as episodic ("when did we discuss..."), semantic ("what is the deployment process?"), or mixed. Matching memory types get a retrieval boost — the right type of answer for the right type of question.
+
+```
+┌──────────────────────────────────────────────────────────────┐
+│                    Sleep Cycle (v1.4)                         │
+│                                                              │
+│  1. Standard FadeMem decay (SML/LML)                         │
+│  2. Multi-trace decay (fast/mid/slow independently)          │
+│  3. Interference pruning (contradict → demote weaker)        │
+│  4. Redundancy collapse (near-dupes → fuse)                  │
+│  5. Homeostatic normalization (budget enforcement)            │
+│  6. Replay distillation (episodic → semantic facts)          │
+│  7. Trace cascade (fast → mid → slow consolidation)          │
+└──────────────────────────────────────────────────────────────┘
 ```
 
 #### Handoff Bus — Cross-Agent Continuity
@@ -785,7 +833,7 @@ Engram is based on:
 | Multi-hop Reasoning | +12% accuracy |
 | Retrieval Precision | +8% on LTI-Bench |
 
-Biological inspirations: Ebbinghaus Forgetting Curve → exponential decay, Spaced Repetition → access boosts strength, Sleep Consolidation → SML → LML promotion, Working Memory → Active Memory signal bus, Conscious/Subconscious Split → Active vs Passive memory, Production Effect → echo encoding, Elaborative Encoding → deeper processing = stronger memory.
+Biological inspirations: Ebbinghaus Forgetting Curve → exponential decay, Spaced Repetition → access boosts strength, Sleep Consolidation → SML → LML promotion + CLS replay distillation, Benna-Fusi Model → multi-timescale strength traces (fast/mid/slow), Complementary Learning Systems → episodic-to-semantic consolidation, Working Memory → Active Memory signal bus, Conscious/Subconscious Split → Active vs Passive memory, Production Effect → echo encoding, Elaborative Encoding → deeper processing = stronger memory.
 
 ---
 
