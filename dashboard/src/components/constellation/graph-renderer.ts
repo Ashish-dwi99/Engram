@@ -24,7 +24,7 @@ export class GraphRenderer {
     await this.app.init({
       canvas,
       resizeTo: canvas.parentElement || undefined,
-      backgroundColor: 0xf9fafb,
+      backgroundColor: 0x050510,
       antialias: true,
       resolution: window.devicePixelRatio || 1,
       autoDensity: true,
@@ -53,10 +53,10 @@ export class GraphRenderer {
       const sPos = this.positions.get(edge.source);
       const tPos = this.positions.get(edge.target);
       if (!sPos || !tPos) continue;
-      const color = edge.type === "category" ? 0x7c3aed : 0xd1d5db;
+      const color = edge.type === "category" ? 0x7c3aed : 0x22d3ee;
       edgeGfx.moveTo(sPos.x, sPos.y);
       edgeGfx.lineTo(tPos.x, tPos.y);
-      edgeGfx.stroke({ width: 0.5, color, alpha: 0.3 });
+      edgeGfx.stroke({ width: 0.5, color, alpha: 0.15 });
     }
     this.edgesContainer.addChild(edgeGfx);
 
@@ -75,10 +75,15 @@ export class GraphRenderer {
           : parseInt(COLORS.lml.slice(1), 16);
 
       const gfx = new Graphics();
+
+      // Glow halo
+      gfx.circle(0, 0, radius * 2);
+      gfx.fill({ color: colorHex, alpha: 0.08 });
+
+      // Main node
       gfx.circle(0, 0, radius);
       gfx.fill({ color: colorHex, alpha: 0.85 });
-      gfx.circle(0, 0, radius);
-      gfx.stroke({ width: 1.5, color: 0xffffff });
+
       gfx.position.set(pos.x, pos.y);
       gfx.eventMode = "static";
       gfx.cursor = "pointer";
@@ -105,7 +110,7 @@ export class GraphRenderer {
           text: node.label.slice(0, 20),
           style: new TextStyle({
             fontSize: 9,
-            fill: 0x374151,
+            fill: 0x94a3b8,
             fontFamily: "system-ui",
           }),
         });

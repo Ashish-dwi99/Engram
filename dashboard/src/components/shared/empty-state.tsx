@@ -13,9 +13,9 @@ export function EmptyState({
 }) {
   return (
     <div className="flex flex-col items-center justify-center py-16 text-center">
-      <Icon className="h-12 w-12 text-gray-300 mb-4" />
-      <h3 className="text-sm font-medium text-gray-900">{title}</h3>
-      <p className="mt-1 text-sm text-gray-500">{description}</p>
+      <Icon className="h-12 w-12 mb-4 text-slate-700" />
+      <h3 className="text-sm font-medium text-slate-300">{title}</h3>
+      <p className="mt-1 text-sm" style={{ color: '#64748b' }}>{description}</p>
     </div>
   );
 }

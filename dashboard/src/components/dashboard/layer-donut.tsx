@@ -17,8 +17,8 @@ export function LayerDonut({
   const colors = [COLORS.sml, COLORS.lml];
 
   return (
-    <div className="rounded-lg border border-gray-200 bg-white p-4">
-      <h3 className="text-sm font-medium text-gray-700 mb-2">Layer Distribution</h3>
+    <div className="glass p-4">
+      <h3 className="text-sm font-medium text-slate-300 mb-2">Layer Distribution</h3>
       <div className="h-48">
         <ResponsiveContainer width="100%" height="100%">
           <PieChart>
@@ -35,14 +35,22 @@ export function LayerDonut({
                 <Cell key={i} fill={colors[i]} />
               ))}
             </Pie>
-            <Tooltip contentStyle={{ fontSize: 12 }} />
+            <Tooltip
+              contentStyle={{
+                fontSize: 12,
+                backgroundColor: 'rgba(26,26,58,0.9)',
+                border: '1px solid rgba(124,58,237,0.2)',
+                borderRadius: 8,
+                color: '#e2e8f0',
+              }}
+            />
             <Legend
               verticalAlign="bottom"
               height={24}
               iconType="circle"
               iconSize={8}
               formatter={(value) => (
-                <span className="text-xs text-gray-600">{value}</span>
+                <span className="text-xs" style={{ color: '#94a3b8' }}>{value}</span>
               )}
             />
           </PieChart>

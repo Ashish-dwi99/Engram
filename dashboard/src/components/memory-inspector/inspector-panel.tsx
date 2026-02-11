@@ -7,12 +7,14 @@ import { useMemory, useMemoryHistory } from "@/lib/hooks/use-memory";
 import { FadeMemTab } from "./fadem-tab";
 import { EchoTab } from "./echo-tab";
 import { CategoryTab } from "./category-tab";
+import { TraceTab } from "./trace-tab";
 import { HistoryTimeline } from "./history-timeline";
 import { InspectorActions } from "./inspector-actions";
 import { cn } from "@/lib/utils/format";
 import { useState } from "react";
+import { NEURAL } from "@/lib/utils/neural-palette";
 
-const TABS = ["FadeMem", "EchoMem", "CategoryMem", "History"] as const;
+const TABS = ["FadeMem", "EchoMem", "Traces", "CategoryMem", "History"] as const;
 type Tab = (typeof TABS)[number];
 
 function InspectorContent() {
@@ -31,7 +33,7 @@ function InspectorContent() {
 
   if (!memory) {
     return (
-      <div className="flex h-full items-center justify-center text-gray-400 text-sm">
+      <div className="flex h-full items-center justify-center text-sm" style={{ color: NEURAL.shallow }}>
         Loading...
       </div>
     );
@@ -40,27 +42,27 @@ function InspectorContent() {
   return (
     <div className="flex h-full flex-col">
       {/* Header */}
-      <div className="flex items-start justify-between border-b border-gray-200 px-5 py-4">
+      <div className="flex items-start justify-between px-5 py-4 border-b" style={{ borderColor: 'rgba(124, 58, 237, 0.12)' }}>
         <div className="flex-1 min-w-0">
-          <p className="text-sm text-gray-500 font-mono truncate">{memory.id}</p>
-          <p className="mt-1 text-sm text-gray-900 line-clamp-3">{memory.content}</p>
+          <p className="text-sm font-mono truncate" style={{ color: NEURAL.shallow }}>{memory.id}</p>
+          <p className="mt-1 text-sm text-slate-200 line-clamp-3">{memory.content}</p>
         </div>
-        <button onClick={close} className="ml-3 p-1 hover:bg-gray-100 rounded">
-          <X className="h-4 w-4 text-gray-400" />
+        <button onClick={close} className="ml-3 p-1 rounded hover:bg-white/[0.05] transition-colors">
+          <X className="h-4 w-4" style={{ color: NEURAL.shallow }} />
         </button>
       </div>
 
       {/* Tabs */}
-      <div className="flex border-b border-gray-200 px-5">
+      <div className="flex border-b px-5 overflow-x-auto" style={{ borderColor: 'rgba(124, 58, 237, 0.12)' }}>
         {TABS.map((tab) => (
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
             className={cn(
-              "px-3 py-2.5 text-xs font-medium transition-colors border-b-2 -mb-px",
+              "px-3 py-2.5 text-xs font-medium transition-colors border-b-2 -mb-px whitespace-nowrap",
               activeTab === tab
-                ? "border-purple-600 text-purple-700"
-                : "border-transparent text-gray-500 hover:text-gray-700"
+                ? "border-purple-500 text-purple-300"
+                : "border-transparent text-slate-500 hover:text-slate-300"
             )}
           >
             {tab}
@@ -72,6 +74,7 @@ function InspectorContent() {
       <div className="flex-1 overflow-y-auto px-5 py-4">
         {activeTab === "FadeMem" && <FadeMemTab memory={memory} />}
         {activeTab === "EchoMem" && <EchoTab memory={memory} />}
+        {activeTab === "Traces" && <TraceTab memory={memory} />}
         {activeTab === "CategoryMem" && <CategoryTab memory={memory} />}
         {activeTab === "History" && <HistoryTimeline entries={history || []} />}
       </div>
@@ -88,9 +91,13 @@ export function InspectorWrapper() {
   return (
     <div
       className={cn(
-        "h-screen border-l border-gray-200 bg-white transition-all duration-200 overflow-hidden",
+        "h-screen border-l transition-all duration-200 overflow-hidden",
         isOpen ? "w-[480px]" : "w-0"
       )}
+      style={{
+        backgroundColor: NEURAL.cortex,
+        borderColor: 'rgba(124, 58, 237, 0.12)',
+      }}
     >
       {isOpen && <InspectorContent />}
     </div>

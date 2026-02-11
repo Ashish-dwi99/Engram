@@ -10,6 +10,7 @@ import {
 } from "@/lib/utils/decay-math";
 import { timeAgo } from "@/lib/utils/format";
 import { COLORS } from "@/lib/utils/colors";
+import { NEURAL } from "@/lib/utils/neural-palette";
 import type { Memory } from "@/lib/types/memory";
 import {
   AreaChart,
@@ -30,7 +31,7 @@ function StrengthRing({ strength, layer }: { strength: number; layer: string }) 
   return (
     <div className="relative inline-flex items-center justify-center">
       <svg width="96" height="96" viewBox="0 0 96 96">
-        <circle cx="48" cy="48" r="40" fill="none" stroke="#f3f4f6" strokeWidth="6" />
+        <circle cx="48" cy="48" r="40" fill="none" stroke="rgba(124,58,237,0.1)" strokeWidth="6" />
         <circle
           cx="48"
           cy="48"
@@ -43,9 +44,10 @@ function StrengthRing({ strength, layer }: { strength: number; layer: string }) 
           strokeLinecap="round"
           transform="rotate(-90 48 48)"
           className="transition-all duration-500"
+          style={{ filter: `drop-shadow(0 0 6px ${color}50)` }}
         />
       </svg>
-      <span className="absolute text-lg font-semibold text-gray-900">
+      <span className="absolute text-lg font-semibold text-white">
         {Math.round(pct)}%
       </span>
     </div>
@@ -58,17 +60,17 @@ function ProgressBar({ value, max, label }: { value: number; max: number; label:
   return (
     <div>
       <div className="flex justify-between text-xs mb-1">
-        <span className="text-gray-500">{label}</span>
-        <span className={met ? "text-green-600 font-medium" : "text-gray-500"}>
-          {value} / {max}
+        <span style={{ color: NEURAL.shallow }}>{label}</span>
+        <span className={met ? "text-green-400 font-medium" : ""} style={!met ? { color: NEURAL.shallow } : undefined}>
+          {typeof value === 'number' && value < 1 ? value.toFixed(2) : value} / {max}
         </span>
       </div>
-      <div className="h-1.5 rounded-full bg-gray-100">
+      <div className="h-1.5 rounded-full" style={{ backgroundColor: 'rgba(124,58,237,0.1)' }}>
         <div
           className="h-1.5 rounded-full transition-all"
           style={{
             width: `${pct}%`,
-            backgroundColor: met ? "#22c55e" : "#d4d4d4",
+            backgroundColor: met ? NEURAL.success : '#475569',
           }}
         />
       </div>
@@ -92,11 +94,11 @@ export function FadeMemTab({ memory }: { memory: Memory }) {
           <div className="flex items-center gap-2">
             <LayerBadge layer={memory.layer} />
           </div>
-          <p className="text-xs text-gray-500">
+          <p className="text-xs" style={{ color: NEURAL.shallow }}>
             Accessed {memory.access_count} time{memory.access_count !== 1 ? "s" : ""}
           </p>
           {memory.last_accessed && (
-            <p className="text-xs text-gray-500">
+            <p className="text-xs" style={{ color: NEURAL.shallow }}>
               Last accessed {timeAgo(memory.last_accessed)}
             </p>
           )}
@@ -105,7 +107,7 @@ export function FadeMemTab({ memory }: { memory: Memory }) {
 
       {/* 30-day decay projection */}
       <div>
-        <h4 className="text-xs font-medium text-gray-700 mb-2">
+        <h4 className="text-xs font-medium text-slate-300 mb-2">
           30-Day Decay Projection
         </h4>
         <div className="h-32">
@@ -125,21 +127,27 @@ export function FadeMemTab({ memory }: { memory: Memory }) {
                   />
                 </linearGradient>
               </defs>
-              <XAxis dataKey="day" tick={{ fontSize: 10 }} tickLine={false} axisLine={false} />
+              <XAxis dataKey="day" tick={{ fontSize: 10, fill: '#64748b' }} tickLine={false} axisLine={false} />
               <YAxis
                 domain={[0, 1]}
-                tick={{ fontSize: 10 }}
+                tick={{ fontSize: 10, fill: '#64748b' }}
                 tickLine={false}
                 axisLine={false}
                 width={28}
               />
               <Tooltip
-                contentStyle={{ fontSize: 11 }}
+                contentStyle={{
+                  fontSize: 11,
+                  backgroundColor: 'rgba(26,26,58,0.9)',
+                  border: '1px solid rgba(124,58,237,0.2)',
+                  borderRadius: 8,
+                  color: '#e2e8f0',
+                }}
                 formatter={(v) => [`${(Number(v) * 100).toFixed(1)}%`, "Strength"]}
                 labelFormatter={(l) => `Day ${l}`}
               />
-              <ReferenceLine y={FORGET_THRESHOLD} stroke="#ef4444" strokeDasharray="3 3" />
-              <ReferenceLine y={PROMOTE_THRESHOLD} stroke="#22c55e" strokeDasharray="3 3" />
+              <ReferenceLine y={FORGET_THRESHOLD} stroke={NEURAL.conflict} strokeDasharray="3 3" />
+              <ReferenceLine y={PROMOTE_THRESHOLD} stroke={NEURAL.success} strokeDasharray="3 3" />
               <Area
                 type="monotone"
                 dataKey="strength"
@@ -150,12 +158,12 @@ export function FadeMemTab({ memory }: { memory: Memory }) {
             </AreaChart>
           </ResponsiveContainer>
         </div>
-        <div className="flex gap-4 mt-1 text-[10px] text-gray-400">
+        <div className="flex gap-4 mt-1 text-[10px]" style={{ color: NEURAL.forgotten }}>
           <span className="flex items-center gap-1">
-            <span className="inline-block w-3 h-px bg-red-400" /> Forget ({FORGET_THRESHOLD})
+            <span className="inline-block w-3 h-px" style={{ backgroundColor: NEURAL.conflict }} /> Forget ({FORGET_THRESHOLD})
           </span>
           <span className="flex items-center gap-1">
-            <span className="inline-block w-3 h-px bg-green-400" /> Promote ({PROMOTE_THRESHOLD})
+            <span className="inline-block w-3 h-px" style={{ backgroundColor: NEURAL.success }} /> Promote ({PROMOTE_THRESHOLD})
           </span>
         </div>
       </div>
@@ -163,7 +171,7 @@ export function FadeMemTab({ memory }: { memory: Memory }) {
       {/* Promotion pathway */}
       {memory.layer === "sml" && (
         <div>
-          <h4 className="text-xs font-medium text-gray-700 mb-3">
+          <h4 className="text-xs font-medium text-slate-300 mb-3">
             Promotion Pathway (SML → LML)
           </h4>
           <div className="space-y-2.5">
@@ -183,7 +191,7 @@ export function FadeMemTab({ memory }: { memory: Memory }) {
 
       {/* Current strength bar */}
       <div>
-        <h4 className="text-xs font-medium text-gray-700 mb-2">Current Strength</h4>
+        <h4 className="text-xs font-medium text-slate-300 mb-2">Current Strength</h4>
         <StrengthIndicator strength={memory.strength} layer={memory.layer} size="md" />
       </div>
     </div>

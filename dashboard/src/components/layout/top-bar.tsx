@@ -3,6 +3,7 @@
 import { Search } from "lucide-react";
 import { useFilterStore } from "@/lib/stores/filter-store";
 import { useCallback, useState } from "react";
+import { NEURAL } from "@/lib/utils/neural-palette";
 
 export function TopBar() {
   const setSearchQuery = useFilterStore((s) => s.setSearchQuery);
@@ -17,15 +18,26 @@ export function TopBar() {
   );
 
   return (
-    <header className="flex h-14 items-center gap-4 border-b border-gray-200 bg-white px-6">
+    <header
+      className="flex h-14 items-center gap-4 border-b px-6"
+      style={{
+        backgroundColor: NEURAL.cortex,
+        borderColor: `rgba(124, 58, 237, 0.12)`,
+      }}
+    >
       <form onSubmit={handleSubmit} className="relative flex-1 max-w-md">
-        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+        <Search className="absolute left-2.5 top-1/2 -translate-y-1/2 h-4 w-4" style={{ color: NEURAL.shallow }} />
         <input
           type="text"
           placeholder="Search memories..."
           value={value}
           onChange={(e) => setValue(e.target.value)}
-          className="w-full rounded-md border border-gray-200 bg-gray-50 py-1.5 pl-9 pr-3 text-sm text-gray-900 placeholder:text-gray-400 focus:border-purple-300 focus:bg-white focus:outline-none focus:ring-1 focus:ring-purple-300"
+          className="w-full rounded-lg py-1.5 pl-9 pr-3 text-sm placeholder:text-slate-500 focus:outline-none focus:ring-1"
+          style={{
+            backgroundColor: NEURAL.synapse,
+            color: '#e2e8f0',
+            border: `1px solid rgba(124, 58, 237, 0.12)`,
+          }}
         />
       </form>
     </header>

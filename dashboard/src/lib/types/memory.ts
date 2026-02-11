@@ -10,6 +10,11 @@ export interface Memory {
   created_at: string;
   updated_at: string;
   last_accessed?: string;
+  memory_type?: "episodic" | "semantic";
+  scene_id?: string;
+  s_fast?: number;
+  s_mid?: number;
+  s_slow?: number;
   metadata?: MemoryMetadata;
 }
 
@@ -22,6 +27,7 @@ export interface MemoryMetadata {
   echo_importance?: number;
   source_type?: string;
   source_app?: string;
+  related_memories?: string[];
   [key: string]: unknown;
 }
 

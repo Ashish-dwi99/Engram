@@ -1,11 +1,12 @@
 "use client";
 
 import type { Memory } from "@/lib/types/memory";
+import { NEURAL } from "@/lib/utils/neural-palette";
 
 function Section({ title, children }: { title: string; children: React.ReactNode }) {
   return (
     <div>
-      <h4 className="text-xs font-medium text-gray-700 mb-2">{title}</h4>
+      <h4 className="text-xs font-medium text-slate-300 mb-2">{title}</h4>
       {children}
     </div>
   );
@@ -17,7 +18,11 @@ function TagList({ items }: { items: string[] }) {
       {items.map((item, i) => (
         <span
           key={i}
-          className="inline-flex rounded-full bg-gray-100 px-2.5 py-0.5 text-xs text-gray-700"
+          className="inline-flex rounded-full px-2.5 py-0.5 text-xs"
+          style={{
+            backgroundColor: 'rgba(124, 58, 237, 0.1)',
+            color: '#c4b5fd',
+          }}
         >
           {item}
         </span>
@@ -30,7 +35,7 @@ function StringList({ items }: { items: string[] }) {
   return (
     <ul className="space-y-1.5">
       {items.map((item, i) => (
-        <li key={i} className="text-sm text-gray-600 leading-relaxed">
+        <li key={i} className="text-sm leading-relaxed" style={{ color: '#cbd5e1' }}>
           {item}
         </li>
       ))}
@@ -57,21 +62,32 @@ export function EchoTab({ memory }: { memory: Memory }) {
     <div className="space-y-5">
       {/* Echo depth badge */}
       <div className="flex items-center gap-3">
-        <span className="text-xs text-gray-500">Echo Depth</span>
-        <span className="inline-flex rounded-full bg-purple-50 px-2.5 py-0.5 text-xs font-medium text-purple-700 ring-1 ring-purple-200 capitalize">
+        <span className="text-xs" style={{ color: NEURAL.shallow }}>Echo Depth</span>
+        <span
+          className="inline-flex rounded-full px-2.5 py-0.5 text-xs font-medium ring-1 capitalize"
+          style={{
+            backgroundColor: `${NEURAL.deep}15`,
+            color: NEURAL.deep,
+            borderColor: `${NEURAL.deep}30`,
+          }}
+        >
           {depth}
         </span>
         {importance !== undefined && (
           <>
-            <span className="text-xs text-gray-500 ml-2">Importance</span>
+            <span className="text-xs ml-2" style={{ color: NEURAL.shallow }}>Importance</span>
             <div className="flex items-center gap-1.5">
-              <div className="w-16 h-1.5 rounded-full bg-gray-100">
+              <div className="w-16 h-1.5 rounded-full" style={{ backgroundColor: 'rgba(124,58,237,0.1)' }}>
                 <div
-                  className="h-1.5 rounded-full bg-purple-500"
-                  style={{ width: `${(importance as number) * 100}%` }}
+                  className="h-1.5 rounded-full"
+                  style={{
+                    width: `${(importance as number) * 100}%`,
+                    backgroundColor: NEURAL.deep,
+                    boxShadow: `0 0 6px ${NEURAL.deep}50`,
+                  }}
                 />
               </div>
-              <span className="text-xs text-gray-500">
+              <span className="text-xs" style={{ color: NEURAL.shallow }}>
                 {((importance as number) * 100).toFixed(0)}%
               </span>
             </div>
@@ -80,7 +96,7 @@ export function EchoTab({ memory }: { memory: Memory }) {
       </div>
 
       {!hasEchoData && (
-        <p className="text-sm text-gray-400">No echo encoding data available.</p>
+        <p className="text-sm" style={{ color: NEURAL.shallow }}>No echo encoding data available.</p>
       )}
 
       {paraphrases.length > 0 && (

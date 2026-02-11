@@ -17,13 +17,17 @@ export function StrengthIndicator({
 
   return (
     <div className="flex items-center gap-2">
-      <div className={`flex-1 rounded-full bg-gray-100 ${h}`}>
+      <div className={`flex-1 rounded-full ${h}`} style={{ backgroundColor: 'rgba(124, 58, 237, 0.1)' }}>
         <div
           className={`${h} rounded-full transition-all`}
-          style={{ width: `${pct}%`, backgroundColor: color }}
+          style={{
+            width: `${pct}%`,
+            backgroundColor: color,
+            boxShadow: `0 0 8px ${color}40`,
+          }}
         />
       </div>
-      <span className="text-xs text-gray-500 tabular-nums w-8 text-right">
+      <span className="text-xs tabular-nums w-8 text-right" style={{ color: '#94a3b8' }}>
         {pct}%
       </span>
     </div>
