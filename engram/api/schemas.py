@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, Field
 
 from engram.core.policy import ALL_CONFIDENTIALITY_SCOPES, DEFAULT_CAPABILITIES
+
+HandoffStatus = Literal["active", "paused", "completed", "abandoned"]
 
 
 class SessionCreateRequest(BaseModel):
@@ -37,7 +39,7 @@ class HandoffResumeRequest(BaseModel):
     objective: Optional[str] = Field(default=None)
     agent_role: Optional[str] = Field(default=None)
     namespace: str = Field(default="default")
-    statuses: Optional[List[str]] = Field(default=None)
+    statuses: Optional[List[HandoffStatus]] = Field(default=None)
     auto_create: bool = Field(default=True)
 
 
@@ -54,7 +56,7 @@ class HandoffCheckpointRequest(BaseModel):
     namespace: str = Field(default="default")
     confidentiality_scope: str = Field(default="work")
     event_type: str = Field(default="tool_complete")
-    status: str = Field(default="active")
+    status: HandoffStatus = Field(default="active")
     task_summary: Optional[str] = Field(default=None)
     decisions_made: List[str] = Field(default_factory=list)
     files_touched: List[str] = Field(default_factory=list)
@@ -64,6 +66,30 @@ class HandoffCheckpointRequest(BaseModel):
     test_results: List[str] = Field(default_factory=list)
     context_snapshot: Optional[str] = Field(default=None)
     expected_version: Optional[int] = Field(default=None)
+
+
+class HandoffSessionDigestRequest(BaseModel):
+    user_id: str = Field(default="default")
+    agent_id: str = Field(default="claude-code")
+    requester_agent_id: Optional[str] = Field(default=None)
+    task_summary: str
+    repo: Optional[str] = Field(default=None)
+    branch: Optional[str] = Field(default=None)
+    lane_id: Optional[str] = Field(default=None)
+    lane_type: Optional[str] = Field(default=None)
+    agent_role: Optional[str] = Field(default=None)
+    namespace: str = Field(default="default")
+    confidentiality_scope: str = Field(default="work")
+    status: HandoffStatus = Field(default="paused")
+    decisions_made: List[str] = Field(default_factory=list)
+    files_touched: List[str] = Field(default_factory=list)
+    todos_remaining: List[str] = Field(default_factory=list)
+    blockers: List[str] = Field(default_factory=list)
+    key_commands: List[str] = Field(default_factory=list)
+    test_results: List[str] = Field(default_factory=list)
+    context_snapshot: Optional[str] = Field(default=None)
+    started_at: Optional[str] = Field(default=None)
+    ended_at: Optional[str] = Field(default=None)
 
 
 class SearchRequestV2(BaseModel):

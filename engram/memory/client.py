@@ -271,6 +271,52 @@ class MemoryClient:
             params["statuses"] = statuses
         return self._request("GET", "/v1/handoff/lanes", params=params)
 
+    def save_session_digest(self, **kwargs) -> Dict[str, Any]:
+        payload = dict(kwargs)
+        return self._request("POST", "/v1/handoff/sessions/digest", json_body=payload)
+
+    def get_last_session(
+        self,
+        *,
+        user_id: str,
+        agent_id: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+        repo: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "requester_agent_id": requester_agent_id,
+            "repo": repo,
+        }
+        if statuses:
+            params["statuses"] = statuses
+        return self._request("GET", "/v1/handoff/sessions/last", params=params)
+
+    def list_sessions(
+        self,
+        *,
+        user_id: str,
+        agent_id: Optional[str] = None,
+        requester_agent_id: Optional[str] = None,
+        repo: Optional[str] = None,
+        status: Optional[str] = None,
+        statuses: Optional[List[str]] = None,
+        limit: int = 20,
+    ) -> Dict[str, Any]:
+        params: Dict[str, Any] = {
+            "user_id": user_id,
+            "agent_id": agent_id,
+            "requester_agent_id": requester_agent_id,
+            "repo": repo,
+            "status": status,
+            "limit": limit,
+        }
+        if statuses:
+            params["statuses"] = statuses
+        return self._request("GET", "/v1/handoff/sessions", params=params)
+
     def get_agent_trust(self, *, user_id: str, agent_id: str) -> Dict[str, Any]:
         return self._request("GET", "/v1/trust", params={"user_id": user_id, "agent_id": agent_id})
 

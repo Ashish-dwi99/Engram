@@ -14,7 +14,7 @@ class NvidiaLLM(BaseLLM):
         except Exception as exc:
             raise ImportError("openai package is required for NvidiaLLM") from exc
 
-        api_key = self.config.get("api_key") or "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"
+        api_key = self.config.get("api_key")
         if not api_key:
             raise ValueError(
                 "NVIDIA API key required. Set config['api_key'] or NVIDIA_API_KEY env var."

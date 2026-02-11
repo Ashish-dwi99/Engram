@@ -251,7 +251,7 @@ Scene: "Engram v2 architecture session"
 
 #### Handoff Bus — Cross-Agent Continuity
 
-When an agent pauses work — rate limit, crash, you switch tools — it saves a session digest: task summary, decisions made, files touched, remaining TODOs, blockers. The next agent calls `get_last_session` and gets the full context. No re-explanation needed.
+Engram now defaults to a zero-intervention continuity model: MCP adapters automatically request resume context before tool execution and auto-write checkpoints on lifecycle events (`tool_complete`, `agent_pause`, `agent_end`). The legacy tools (`save_session_digest`, `get_last_session`, `list_sessions`) remain available for compatibility.
 
 ```
 Claude Code (rate limited)
@@ -263,6 +263,9 @@ Codex (picks up)
   → Gets full context: task, decisions, files, todos
   → Continues where Claude Code stopped
 ```
+
+**Default runtime model:** hosted session bus when `ENGRAM_API_URL` is configured.  
+**Default security posture:** strict handoff auth (`read_handoff` / `write_handoff`) with no implicit trusted-agent bootstrap.
 
 ---
 
@@ -328,6 +331,14 @@ project directory) so agents call handoff tools automatically:
 - `CLAUDE.md`
 - `CURSOR.md`
 - `.cursor/rules/engram-continuity.mdc`
+
+For hosted continuity, set:
+
+```bash
+export ENGRAM_API_URL="http://127.0.0.1:8100"
+export ENGRAM_ADMIN_KEY="<admin-key>"     # for session minting
+export ENGRAM_API_KEY="<optional-api-key>" # if your hosted API expects bearer auth
+```
 
 Set `ENGRAM_INSTALL_SKIP_WORKSPACE_RULES=1` to disable this behavior.
 
@@ -416,6 +427,9 @@ Once configured, your agent has access to these tools:
 | `get_last_session` | Load session context from the last active agent |
 | `list_sessions` | Browse handoff history across agents |
 
+Auto-lifecycle behavior is server-driven: when `auto_session_bus` is enabled,
+Engram writes handoff checkpoints without explicit user prompts.
+
 ---
 
 ## API & SDK
@@ -482,6 +496,30 @@ curl -X POST http://localhost:8100/v1/handoff/checkpoint \
 
 curl "http://localhost:8100/v1/handoff/lanes?user_id=u123"
 ```
+
+### Handoff Compatibility Routes
+
+Hosted integrations can call compatibility routes that mirror MCP handoff tools:
+
+```bash
+# Save digest (compat)
+curl -X POST http://localhost:8100/v1/handoff/sessions/digest \
+  -H "Authorization: Bearer <TOKEN>" \
+  -H "Content-Type: application/json" \
+  -d '{"user_id":"u123","agent_id":"codex","task_summary":"Continue task","repo":"/repo"}'
+
+# Get last session (compat)
+curl "http://localhost:8100/v1/handoff/sessions/last?user_id=u123&repo=/repo"
+
+# List sessions (compat)
+curl "http://localhost:8100/v1/handoff/sessions?user_id=u123&repo=/repo&limit=20"
+```
+
+### Continuity Troubleshooting
+
+- `hosted_backend_unavailable`: verify `ENGRAM_API_URL` and network reachability.
+- `missing_or_expired_token` / `missing_capability`: ensure the caller has a valid session token with `read_handoff` or `write_handoff`.
+- `Storage folder ... qdrant is already accessed`: local Qdrant file mode is single-process; use hosted API mode or a shared Qdrant server for concurrent agents.
 
 ### Python SDK
 

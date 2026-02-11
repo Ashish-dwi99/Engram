@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "engram-memory"
-version = "0.4.1"
+version = "0.5.0b1"
 description = "Memory layer for AI agents — biologically-inspired forgetting, multi-agent trust, and plug-and-play integrations"
 readme = "README.md"
 requires-python = ">=3.9"
@@ -53,6 +53,9 @@ all = [
 ]
 async = [
     "aiosqlite>=0.19.0",
+]
+docs = [
+    "reportlab>=4.0.0",
 ]
 dev = [
     "pytest>=7.0.0",

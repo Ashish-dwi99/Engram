@@ -1,10 +1,46 @@
 import json
+import logging
 import os
 import sqlite3
+import threading
 import uuid
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, Iterable, List, Optional
+
+logger = logging.getLogger(__name__)
+
+# Phase 5: Allowed column names for dynamic UPDATE queries to prevent SQL injection.
+VALID_MEMORY_COLUMNS = frozenset({
+    "memory", "metadata", "categories", "embedding", "strength",
+    "layer", "tombstone", "updated_at", "related_memories", "source_memories",
+    "confidentiality_scope", "source_type", "source_app", "source_event_id",
+    "decay_lambda", "status", "importance", "sensitivity", "namespace",
+    "access_count", "last_accessed", "immutable", "expiration_date",
+    "scene_id", "user_id", "agent_id", "run_id", "app_id",
+})
+
+VALID_SCENE_COLUMNS = frozenset({
+    "title", "summary", "topic", "location", "participants", "memory_ids",
+    "start_time", "end_time", "embedding", "strength", "access_count",
+    "tombstone", "layer", "scene_strength", "topic_embedding_ref", "namespace",
+})
+
+VALID_PROFILE_COLUMNS = frozenset({
+    "name", "profile_type", "narrative", "facts", "preferences",
+    "relationships", "sentiment", "theory_of_mind", "aliases",
+    "embedding", "strength", "updated_at", "role_bias", "profile_summary",
+})
+
+
+def _utcnow() -> datetime:
+    """Return current UTC datetime (timezone-aware)."""
+    return datetime.now(timezone.utc)
+
+
+def _utcnow_iso() -> str:
+    """Return current UTC time as ISO string."""
+    return _utcnow().isoformat()
 
 
 class SQLiteManager:
@@ -13,7 +49,31 @@ class SQLiteManager:
         db_dir = os.path.dirname(db_path)
         if db_dir:
             os.makedirs(db_dir, exist_ok=True)
+        # Phase 1: Persistent connection with WAL mode.
+        self._conn = sqlite3.connect(db_path, check_same_thread=False)
+        self._conn.execute("PRAGMA journal_mode=WAL")
+        self._conn.execute("PRAGMA busy_timeout=5000")
+        self._conn.execute("PRAGMA synchronous=NORMAL")
+        self._conn.execute("PRAGMA cache_size=-8000")  # 8MB cache
+        self._conn.execute("PRAGMA temp_store=MEMORY")
+        self._conn.row_factory = sqlite3.Row
+        # Reentrant lock is required because some read helpers compose other DB
+        # helpers (e.g., get_proposal_commit -> get_proposal_changes).
+        self._lock = threading.RLock()
         self._init_db()
+
+    def close(self) -> None:
+        """Close the persistent connection for clean shutdown."""
+        with self._lock:
+            if self._conn:
+                try:
+                    self._conn.close()
+                except Exception:
+                    pass
+                self._conn = None  # type: ignore[assignment]
+
+    def __repr__(self) -> str:
+        return f"SQLiteManager(db_path={self.db_path!r})"
 
     def _init_db(self) -> None:
         with self._get_connection() as conn:
@@ -167,13 +227,14 @@ class SQLiteManager:
 
     @contextmanager
     def _get_connection(self):
-        conn = sqlite3.connect(self.db_path)
-        conn.row_factory = sqlite3.Row
-        try:
-            yield conn
-            conn.commit()
-        finally:
-            conn.close()
+        """Yield the persistent connection under the thread lock."""
+        with self._lock:
+            try:
+                yield self._conn
+                self._conn.commit()
+            except Exception:
+                self._conn.rollback()
+                raise
 
     def _ensure_v2_schema(self, conn: sqlite3.Connection) -> None:
         """Create and migrate Engram v2 schema in-place (idempotent)."""
@@ -495,6 +556,10 @@ class SQLiteManager:
                     (version,),
                 )
 
+        # Phase 3: Skip column migrations + backfills if already complete.
+        if self._is_migration_applied(conn, "v2_columns_complete"):
+            return
+
         # v2 columns on existing canonical tables.
         self._migrate_add_column_conn(conn, "memories", "confidentiality_scope", "TEXT DEFAULT 'work'")
         self._migrate_add_column_conn(conn, "memories", "source_type", "TEXT")
@@ -525,7 +590,38 @@ class SQLiteManager:
         self._migrate_add_column_conn(conn, "handoff_sessions", "namespace", "TEXT DEFAULT 'default'")
         self._migrate_add_column_conn(conn, "handoff_sessions", "confidentiality_scope", "TEXT DEFAULT 'work'")
 
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_handoff_sessions_recent
+            ON handoff_sessions(user_id, last_checkpoint_at DESC, updated_at DESC, created_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_handoff_lanes_user_recent
+            ON handoff_lanes(user_id, last_checkpoint_at DESC, created_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_handoff_sessions_repo_recent
+            ON handoff_sessions(user_id, repo_id, last_checkpoint_at DESC, created_at DESC)
+            """
+        )
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_handoff_lanes_repo_recent
+            ON handoff_lanes(user_id, repo_id, last_checkpoint_at DESC, created_at DESC)
+            """
+        )
+
         conn.execute("CREATE INDEX IF NOT EXISTS idx_memory_subscribers_expires ON memory_subscribers(expires_at)")
+        conn.execute(
+            """
+            CREATE INDEX IF NOT EXISTS idx_memories_user_source_event
+            ON memories(user_id, source_event_id, namespace, created_at DESC)
+            """
+        )
 
         # Backfills.
         conn.execute(
@@ -633,6 +729,11 @@ class SQLiteManager:
         self._seed_default_namespaces(conn)
         self._seed_invariants(conn)
 
+        # Phase 3: Mark column migrations + backfills as complete.
+        conn.execute(
+            "INSERT OR IGNORE INTO schema_migrations (version) VALUES ('v2_columns_complete')"
+        )
+
     def _seed_default_namespaces(self, conn: sqlite3.Connection) -> None:
         users = conn.execute(
             """
@@ -640,7 +741,7 @@ class SQLiteManager:
             WHERE user_id IS NOT NULL AND user_id != ''
             """
         ).fetchall()
-        now = datetime.utcnow().isoformat()
+        now = _utcnow_iso()
         for row in users:
             user_id = row["user_id"]
             conn.execute(
@@ -749,6 +850,13 @@ class SQLiteManager:
         ).fetchone()
         return row is not None
 
+    # Phase 5: Allowed table names for ALTER TABLE to prevent SQL injection.
+    _ALLOWED_TABLES = frozenset({
+        "memories", "scenes", "profiles", "sessions", "memory_subscribers",
+        "handoff_sessions", "handoff_lanes", "handoff_checkpoints",
+        "proposal_commits", "categories", "views",
+    })
+
     def _migrate_add_column_conn(
         self,
         conn: sqlite3.Connection,
@@ -757,6 +865,11 @@ class SQLiteManager:
         col_type: str,
     ) -> None:
         """Add a column using an existing connection, if missing."""
+        if table not in self._ALLOWED_TABLES:
+            raise ValueError(f"Invalid table for migration: {table!r}")
+        # Validate column name: must be alphanumeric/underscore only.
+        if not column.replace("_", "").isalnum():
+            raise ValueError(f"Invalid column name: {column!r}")
         try:
             conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
         except sqlite3.OperationalError:
@@ -764,7 +877,7 @@ class SQLiteManager:
 
     def add_memory(self, memory_data: Dict[str, Any]) -> str:
         memory_id = memory_data.get("id", str(uuid.uuid4()))
-        now = datetime.utcnow().isoformat()
+        now = _utcnow_iso()
         metadata = memory_data.get("metadata", {}) or {}
         source_app = memory_data.get("source_app") or memory_data.get("app_id") or metadata.get("source_app")
 
@@ -821,7 +934,17 @@ class SQLiteManager:
                 (memory_id,),
             )
 
-        self._log_event(memory_id, "ADD", new_value=memory_data.get("memory"))
+            # Log within the same transaction — atomic with the insert.
+            conn.execute(
+                """
+                INSERT INTO memory_history (
+                    memory_id, event, old_value, new_value,
+                    old_strength, new_strength, old_layer, new_layer
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (memory_id, "ADD", None, memory_data.get("memory"), None, None, None, None),
+            )
+
         return memory_id
 
     def get_memory(self, memory_id: str, include_tombstoned: bool = False) -> Optional[Dict[str, Any]]:
@@ -829,6 +952,41 @@ class SQLiteManager:
         params = [memory_id]
         if not include_tombstoned:
             query += " AND tombstone = 0"
+
+        with self._get_connection() as conn:
+            row = conn.execute(query, params).fetchone()
+            if row:
+                return self._row_to_dict(row)
+        return None
+
+    def get_memory_by_source_event(
+        self,
+        *,
+        user_id: str,
+        source_event_id: str,
+        namespace: Optional[str] = None,
+        source_app: Optional[str] = None,
+        include_tombstoned: bool = False,
+    ) -> Optional[Dict[str, Any]]:
+        normalized_event = str(source_event_id or "").strip()
+        if not normalized_event:
+            return None
+        query = """
+            SELECT *
+            FROM memories
+            WHERE user_id = ?
+              AND source_event_id = ?
+        """
+        params: List[Any] = [user_id, normalized_event]
+        if namespace:
+            query += " AND namespace = ?"
+            params.append(namespace)
+        if source_app:
+            query += " AND source_app = ?"
+            params.append(source_app)
+        if not include_tombstoned:
+            query += " AND tombstone = 0"
+        query += " ORDER BY created_at DESC LIMIT 1"
 
         with self._get_connection() as conn:
             row = conn.execute(query, params).fetchone()
@@ -847,6 +1005,8 @@ class SQLiteManager:
         namespace: Optional[str] = None,
         min_strength: float = 0.0,
         include_tombstoned: bool = False,
+        created_after: Optional[str] = None,
+        created_before: Optional[str] = None,
     ) -> List[Dict[str, Any]]:
         query = "SELECT * FROM memories WHERE strength >= ?"
         params: List[Any] = [min_strength]
@@ -871,6 +1031,12 @@ class SQLiteManager:
         if namespace:
             query += " AND namespace = ?"
             params.append(namespace)
+        if created_after:
+            query += " AND created_at >= ?"
+            params.append(created_after)
+        if created_before:
+            query += " AND created_at <= ?"
+            params.append(created_before)
 
         query += " ORDER BY strength DESC"
 
@@ -879,38 +1045,53 @@ class SQLiteManager:
             return [self._row_to_dict(row) for row in rows]
 
     def update_memory(self, memory_id: str, updates: Dict[str, Any]) -> bool:
-        old_memory = self.get_memory(memory_id, include_tombstoned=True)
-        if not old_memory:
-            return False
-
         set_clauses = []
         params: List[Any] = []
         for key, value in updates.items():
+            if key not in VALID_MEMORY_COLUMNS:
+                raise ValueError(f"Invalid memory column: {key!r}")
             if key in {"metadata", "categories", "embedding", "related_memories", "source_memories"}:
                 value = json.dumps(value)
             set_clauses.append(f"{key} = ?")
             params.append(value)
 
         set_clauses.append("updated_at = ?")
-        params.append(datetime.utcnow().isoformat())
+        params.append(_utcnow_iso())
         params.append(memory_id)
 
         with self._get_connection() as conn:
+            # Read old values and update in a single transaction.
+            old_row = conn.execute(
+                "SELECT memory, strength, layer FROM memories WHERE id = ?",
+                (memory_id,),
+            ).fetchone()
+            if not old_row:
+                return False
+
             conn.execute(
                 f"UPDATE memories SET {', '.join(set_clauses)} WHERE id = ?",
                 params,
             )
 
-        self._log_event(
-            memory_id,
-            "UPDATE",
-            old_value=old_memory.get("memory"),
-            new_value=updates.get("memory"),
-            old_strength=old_memory.get("strength"),
-            new_strength=updates.get("strength"),
-            old_layer=old_memory.get("layer"),
-            new_layer=updates.get("layer"),
-        )
+            # Log within the same transaction.
+            conn.execute(
+                """
+                INSERT INTO memory_history (
+                    memory_id, event, old_value, new_value,
+                    old_strength, new_strength, old_layer, new_layer
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    memory_id,
+                    "UPDATE",
+                    old_row["memory"],
+                    updates.get("memory"),
+                    old_row["strength"],
+                    updates.get("strength"),
+                    old_row["layer"],
+                    updates.get("layer"),
+                ),
+            )
         return True
 
     def delete_memory(self, memory_id: str, use_tombstone: bool = True) -> bool:
@@ -922,7 +1103,7 @@ class SQLiteManager:
         return True
 
     def increment_access(self, memory_id: str) -> None:
-        now = datetime.utcnow().isoformat()
+        now = _utcnow_iso()
         with self._get_connection() as conn:
             conn.execute(
                 """
@@ -933,11 +1114,60 @@ class SQLiteManager:
                 (now, memory_id),
             )
 
-    def _row_to_dict(self, row: sqlite3.Row) -> Dict[str, Any]:
+    # Phase 2: Batch operations to eliminate N+1 queries in search.
+
+    def get_memories_bulk(self, memory_ids: List[str], include_tombstoned: bool = False) -> Dict[str, Dict[str, Any]]:
+        """Fetch multiple memories by ID in a single query. Returns {id: memory_dict}."""
+        if not memory_ids:
+            return {}
+        with self._get_connection() as conn:
+            placeholders = ",".join("?" for _ in memory_ids)
+            query = f"SELECT * FROM memories WHERE id IN ({placeholders})"
+            if not include_tombstoned:
+                query += " AND tombstone = 0"
+            rows = conn.execute(query, memory_ids).fetchall()
+            return {row["id"]: self._row_to_dict(row) for row in rows}
+
+    def increment_access_bulk(self, memory_ids: List[str]) -> None:
+        """Increment access count for multiple memories in a single transaction."""
+        if not memory_ids:
+            return
+        now = _utcnow_iso()
+        with self._get_connection() as conn:
+            placeholders = ",".join("?" for _ in memory_ids)
+            conn.execute(
+                f"""
+                UPDATE memories
+                SET access_count = access_count + 1, last_accessed = ?
+                WHERE id IN ({placeholders})
+                """,
+                [now] + list(memory_ids),
+            )
+
+    def update_strength_bulk(self, updates: Dict[str, float]) -> None:
+        """Batch-update strength for multiple memories. updates = {memory_id: new_strength}."""
+        if not updates:
+            return
+        now = _utcnow_iso()
+        with self._get_connection() as conn:
+            conn.executemany(
+                "UPDATE memories SET strength = ?, updated_at = ? WHERE id = ?",
+                [(strength, now, memory_id) for memory_id, strength in updates.items()],
+            )
+
+    _MEMORY_JSON_FIELDS = ("metadata", "categories", "related_memories", "source_memories")
+
+    def _row_to_dict(self, row: sqlite3.Row, *, skip_embedding: bool = False) -> Dict[str, Any]:
         data = dict(row)
-        for key in ["metadata", "categories", "embedding", "related_memories", "source_memories"]:
+        for key in self._MEMORY_JSON_FIELDS:
             if key in data and data[key]:
                 data[key] = json.loads(data[key])
+        # Embedding is the largest JSON field (~30-50KB for 3072-dim vectors).
+        # Skip deserialization when the caller doesn't need it.
+        if skip_embedding:
+            data.pop("embedding", None)
+        elif "embedding" in data and data["embedding"]:
+            data["embedding"] = json.loads(data["embedding"])
         data["immutable"] = bool(data.get("immutable", 0))
         data["tombstone"] = bool(data.get("tombstone", 0))
         return data
@@ -1131,6 +1361,8 @@ class SQLiteManager:
         set_clauses = []
         params: List[Any] = []
         for key, value in updates.items():
+            if key not in VALID_SCENE_COLUMNS:
+                raise ValueError(f"Invalid scene column: {key!r}")
             if key in {"participants", "memory_ids", "embedding"}:
                 value = json.dumps(value)
             set_clauses.append(f"{key} = ?")
@@ -1230,7 +1462,7 @@ class SQLiteManager:
 
     def add_profile(self, profile_data: Dict[str, Any]) -> str:
         profile_id = profile_data.get("id", str(uuid.uuid4()))
-        now = datetime.utcnow().isoformat()
+        now = _utcnow_iso()
         with self._get_connection() as conn:
             conn.execute(
                 """
@@ -1276,12 +1508,14 @@ class SQLiteManager:
         set_clauses = []
         params: List[Any] = []
         for key, value in updates.items():
+            if key not in VALID_PROFILE_COLUMNS:
+                raise ValueError(f"Invalid profile column: {key!r}")
             if key in {"facts", "preferences", "relationships", "aliases", "theory_of_mind", "embedding"}:
                 value = json.dumps(value)
             set_clauses.append(f"{key} = ?")
             params.append(value)
         set_clauses.append("updated_at = ?")
-        params.append(datetime.utcnow().isoformat())
+        params.append(_utcnow_iso())
         params.append(profile_id)
         with self._get_connection() as conn:
             conn.execute(
@@ -1302,14 +1536,45 @@ class SQLiteManager:
             return [self._profile_row_to_dict(row) for row in rows]
 
     def get_profile_by_name(self, name: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
-        """Find a profile by exact name or alias match."""
-        profiles = self.get_all_profiles(user_id=user_id)
-        name_lower = name.lower()
-        for p in profiles:
-            if p["name"].lower() == name_lower:
-                return p
-            if name_lower in [a.lower() for a in p.get("aliases", [])]:
-                return p
+        """Find a profile by exact name match, then fall back to alias scan."""
+        # Fast path: exact name match via indexed column.
+        query = "SELECT * FROM profiles WHERE lower(name) = ?"
+        params: List[Any] = [name.lower()]
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
+        query += " LIMIT 1"
+        with self._get_connection() as conn:
+            row = conn.execute(query, params).fetchone()
+            if row:
+                return self._profile_row_to_dict(row)
+            # Slow path: alias scan (aliases stored as JSON, can't index).
+            alias_query = "SELECT * FROM profiles WHERE aliases LIKE ?"
+            alias_params: List[Any] = [f'%"{name}"%']
+            if user_id:
+                alias_query += " AND user_id = ?"
+                alias_params.append(user_id)
+            alias_query += " LIMIT 1"
+            row = conn.execute(alias_query, alias_params).fetchone()
+            if row:
+                result = self._profile_row_to_dict(row)
+                # Verify case-insensitive alias match.
+                if name.lower() in [a.lower() for a in result.get("aliases", [])]:
+                    return result
+        return None
+
+    def find_profile_by_substring(self, name: str, user_id: Optional[str] = None) -> Optional[Dict[str, Any]]:
+        """Find a profile where the name contains the query as a substring (case-insensitive)."""
+        query = "SELECT * FROM profiles WHERE lower(name) LIKE ?"
+        params: List[Any] = [f"%{name.lower()}%"]
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
+        query += " ORDER BY strength DESC LIMIT 1"
+        with self._get_connection() as conn:
+            row = conn.execute(query, params).fetchone()
+            if row:
+                return self._profile_row_to_dict(row)
         return None
 
     def add_profile_memory(self, profile_id: str, memory_id: str, role: str = "mentioned") -> None:
@@ -1414,7 +1679,7 @@ class SQLiteManager:
         with self._get_connection() as conn:
             conn.execute(
                 "UPDATE sessions SET revoked_at = ? WHERE id = ?",
-                (datetime.utcnow().isoformat(), session_id),
+                (_utcnow_iso(), session_id),
             )
         return True
 
@@ -1440,8 +1705,8 @@ class SQLiteManager:
                     json.dumps(commit_data.get("checks", {})),
                     json.dumps(commit_data.get("preview", {})),
                     json.dumps(commit_data.get("provenance", {})),
-                    commit_data.get("created_at", datetime.utcnow().isoformat()),
-                    commit_data.get("updated_at", datetime.utcnow().isoformat()),
+                    commit_data.get("created_at", _utcnow_iso()),
+                    commit_data.get("updated_at", _utcnow_iso()),
                 ),
             )
             for change in changes or []:
@@ -1458,7 +1723,7 @@ class SQLiteManager:
                         change.get("target", "memory_item"),
                         change.get("target_id"),
                         json.dumps(change.get("patch", {})),
-                        change.get("created_at", datetime.utcnow().isoformat()),
+                        change.get("created_at", _utcnow_iso()),
                     ),
                 )
         return commit_id
@@ -1505,6 +1770,28 @@ class SQLiteManager:
             commits.append(data)
         return commits
 
+    def count_proposal_commits(
+        self,
+        *,
+        user_id: str,
+        agent_id: Optional[str] = None,
+        since: Optional[str] = None,
+    ) -> int:
+        query = "SELECT COUNT(1) AS cnt FROM proposal_commits WHERE user_id = ?"
+        params: List[Any] = [user_id]
+        if agent_id:
+            query += " AND agent_id = ?"
+            params.append(agent_id)
+        if since:
+            query += " AND created_at >= ?"
+            params.append(since)
+
+        with self._get_connection() as conn:
+            row = conn.execute(query, params).fetchone()
+        if not row:
+            return 0
+        return int(row["cnt"] or 0)
+
     def get_proposal_changes(self, commit_id: str) -> List[Dict[str, Any]]:
         with self._get_connection() as conn:
             rows = conn.execute(
@@ -1525,7 +1812,7 @@ class SQLiteManager:
             set_clauses.append(f"{key} = ?")
             params.append(value)
         set_clauses.append("updated_at = ?")
-        params.append(datetime.utcnow().isoformat())
+        params.append(_utcnow_iso())
         params.append(commit_id)
         with self._get_connection() as conn:
             conn.execute(
@@ -1547,7 +1834,7 @@ class SQLiteManager:
             return False
 
         set_clauses = ["status = ?", "updated_at = ?"]
-        params: List[Any] = [str(to_status or "").upper(), datetime.utcnow().isoformat()]
+        params: List[Any] = [str(to_status or "").upper(), _utcnow_iso()]
         for key, value in (updates or {}).items():
             if key in {"checks", "preview", "provenance"}:
                 value = json.dumps(value)
@@ -1590,7 +1877,7 @@ class SQLiteManager:
                     json.dumps(stash_data.get("proposed", {})),
                     stash_data.get("resolution", "UNRESOLVED"),
                     stash_data.get("source_commit_id"),
-                    stash_data.get("created_at", datetime.utcnow().isoformat()),
+                    stash_data.get("created_at", _utcnow_iso()),
                     stash_data.get("resolved_at"),
                 ),
             )
@@ -1643,7 +1930,7 @@ class SQLiteManager:
                 SET resolution = ?, resolved_at = ?
                 WHERE id = ?
                 """,
-                (resolution, datetime.utcnow().isoformat(), stash_id),
+                (resolution, _utcnow_iso(), stash_id),
             )
         return True
 
@@ -1666,7 +1953,7 @@ class SQLiteManager:
                     view_id,
                     view_data.get("user_id"),
                     view_data.get("agent_id"),
-                    view_data.get("timestamp", datetime.utcnow().isoformat()),
+                    view_data.get("timestamp", _utcnow_iso()),
                     view_data.get("place_type"),
                     view_data.get("place_value"),
                     view_data.get("topic_label"),
@@ -1675,7 +1962,7 @@ class SQLiteManager:
                     view_data.get("raw_text"),
                     json.dumps(view_data.get("signals", {})),
                     view_data.get("scene_id"),
-                    view_data.get("created_at", datetime.utcnow().isoformat()),
+                    view_data.get("created_at", _utcnow_iso()),
                 ),
             )
         return view_id
@@ -1747,7 +2034,7 @@ class SQLiteManager:
                     strong_delta,
                     weak_delta,
                     weak_delta,
-                    datetime.utcnow().isoformat(),
+                    _utcnow_iso(),
                     memory_id,
                 ),
             )
@@ -1760,25 +2047,18 @@ class SQLiteManager:
         ref_type: str = "weak",
         ttl_hours: Optional[int] = None,
     ) -> None:
-        now = datetime.utcnow().isoformat()
+        now_dt = _utcnow()
+        now = now_dt.isoformat()
         expires_at = None
         if ttl_hours is not None:
             try:
                 ttl_value = int(ttl_hours)
             except Exception:
                 ttl_value = 0
-            if ttl_value > 0:
-                expires_at = datetime.utcfromtimestamp(
-                    datetime.utcnow().timestamp() + ttl_value * 3600
-                ).isoformat()
-            elif ttl_value < 0:
-                expires_at = datetime.utcfromtimestamp(
-                    datetime.utcnow().timestamp() + ttl_value * 3600
-                ).isoformat()
+            if ttl_value != 0:
+                expires_at = (now_dt + timedelta(hours=ttl_value)).isoformat()
         elif ref_type == "weak":
-            expires_at = datetime.utcfromtimestamp(
-                datetime.utcnow().timestamp() + 14 * 24 * 3600
-            ).isoformat()
+            expires_at = (now_dt + timedelta(days=14)).isoformat()
 
         with self._get_connection() as conn:
             existing = conn.execute(
@@ -1843,7 +2123,7 @@ class SQLiteManager:
         return [f"{row['subscriber']}:{row['ref_type']}" for row in rows]
 
     def cleanup_stale_memory_subscribers(self, now_iso: Optional[str] = None) -> int:
-        now_iso = now_iso or datetime.utcnow().isoformat()
+        now_iso = now_iso or _utcnow_iso()
         with self._get_connection() as conn:
             rows = conn.execute(
                 """
@@ -1906,7 +2186,7 @@ class SQLiteManager:
                     user_id,
                     digest_date,
                     json.dumps(payload),
-                    datetime.utcnow().isoformat(),
+                    _utcnow_iso(),
                 ),
             )
         return digest_id
@@ -1967,7 +2247,7 @@ class SQLiteManager:
                 approved_dt = datetime.fromisoformat(last_approved_at)
                 days_since = max(
                     0.0,
-                    (datetime.utcnow() - approved_dt).total_seconds() / 86400.0,
+                    (_utcnow() - approved_dt).total_seconds() / 86400.0,
                 )
                 recency_score = max(0.0, 1.0 - min(days_since, 30.0) / 30.0)
             except Exception:
@@ -2018,7 +2298,7 @@ class SQLiteManager:
                     last_proposed_at,
                     last_approved_at,
                     trust_score,
-                    datetime.utcnow().isoformat(),
+                    _utcnow_iso(),
                 ),
             )
         return self.get_agent_trust(user_id=user_id, agent_id=agent_id)
@@ -2027,7 +2307,7 @@ class SQLiteManager:
         if not user_id or not agent_id:
             return {}
         current = self.get_agent_trust(user_id=user_id, agent_id=agent_id)
-        now_iso = datetime.utcnow().isoformat()
+        now_iso = _utcnow_iso()
         auto_stashed = int(current.get("auto_stashed_proposals", 0))
         if (status or "").upper() == "AUTO_STASHED":
             auto_stashed += 1
@@ -2051,7 +2331,7 @@ class SQLiteManager:
         rejected = int(current.get("rejected_proposals", 0))
         auto_stashed = int(current.get("auto_stashed_proposals", 0))
         last_approved_at = current.get("last_approved_at")
-        now_iso = datetime.utcnow().isoformat()
+        now_iso = _utcnow_iso()
         if outcome_upper == "APPROVED":
             approved += 1
             last_approved_at = now_iso
@@ -2091,7 +2371,7 @@ class SQLiteManager:
                     SET description = COALESCE(?, description), updated_at = ?
                     WHERE id = ?
                     """,
-                    (description, datetime.utcnow().isoformat(), namespace_id),
+                    (description, _utcnow_iso(), namespace_id),
                 )
                 return namespace_id
             namespace_id = str(uuid.uuid4())
@@ -2105,8 +2385,8 @@ class SQLiteManager:
                     user_id,
                     ns_name,
                     description,
-                    datetime.utcnow().isoformat(),
-                    datetime.utcnow().isoformat(),
+                    _utcnow_iso(),
+                    _utcnow_iso(),
                 ),
             )
             return namespace_id
@@ -2149,7 +2429,7 @@ class SQLiteManager:
                     user_id,
                     agent_id,
                     capability,
-                    datetime.utcnow().isoformat(),
+                    _utcnow_iso(),
                     expires_at,
                 ),
             )
@@ -2181,7 +2461,7 @@ class SQLiteManager:
             params.append(namespace)
         if not include_expired:
             query += " AND (p.expires_at IS NULL OR p.expires_at > ?)"
-            params.append(datetime.utcnow().isoformat())
+            params.append(_utcnow_iso())
         query += " ORDER BY p.granted_at DESC"
         with self._get_connection() as conn:
             rows = conn.execute(query, params).fetchall()
@@ -2202,7 +2482,7 @@ class SQLiteManager:
                   AND p.capability IN (?, '*')
                   AND (p.expires_at IS NULL OR p.expires_at > ?)
                 """,
-                (user_id, agent_id, capability, datetime.utcnow().isoformat()),
+                (user_id, agent_id, capability, _utcnow_iso()),
             ).fetchall()
         namespaces = [str(row["namespace_name"]) for row in rows if row["namespace_name"]]
         if "default" not in namespaces:
@@ -2238,7 +2518,7 @@ class SQLiteManager:
             for namespace in (allowed_namespaces or [])
             if str(namespace).strip()
         })
-        now_iso = datetime.utcnow().isoformat()
+        now_iso = _utcnow_iso()
         with self._get_connection() as conn:
             conn.execute(
                 """
@@ -2520,7 +2800,7 @@ class SQLiteManager:
 
     def add_handoff_session(self, data: Dict[str, Any]) -> str:
         session_id = data.get("id", str(uuid.uuid4()))
-        now = datetime.utcnow().isoformat()
+        now = _utcnow_iso()
         with self._get_connection() as conn:
             conn.execute(
                 """
@@ -2657,7 +2937,7 @@ class SQLiteManager:
         if not set_clauses:
             return False
         set_clauses.append("updated_at = ?")
-        params.append(datetime.utcnow().isoformat())
+        params.append(_utcnow_iso())
         params.append(session_id)
         with self._get_connection() as conn:
             cursor = conn.execute(
@@ -2723,7 +3003,7 @@ class SQLiteManager:
 
     def add_handoff_lane(self, data: Dict[str, Any]) -> str:
         lane_id = data.get("id", str(uuid.uuid4()))
-        now = datetime.utcnow().isoformat()
+        now = _utcnow_iso()
         with self._get_connection() as conn:
             conn.execute(
                 """
@@ -2807,7 +3087,7 @@ class SQLiteManager:
         if not set_clauses:
             return False
         set_clauses.append("updated_at = ?")
-        params.append(datetime.utcnow().isoformat())
+        params.append(_utcnow_iso())
         query = f"UPDATE handoff_lanes SET {', '.join(set_clauses)} WHERE id = ?"
         params.append(lane_id)
         if expected_version is not None:
@@ -2858,7 +3138,7 @@ class SQLiteManager:
 
     def add_handoff_checkpoint(self, data: Dict[str, Any]) -> str:
         checkpoint_id = data.get("id", str(uuid.uuid4()))
-        now = datetime.utcnow().isoformat()
+        now = _utcnow_iso()
         with self._get_connection() as conn:
             conn.execute(
                 """
@@ -3004,7 +3284,7 @@ class SQLiteManager:
 
     def add_handoff_lane_conflict(self, data: Dict[str, Any]) -> str:
         conflict_id = data.get("id", str(uuid.uuid4()))
-        now = datetime.utcnow().isoformat()
+        now = _utcnow_iso()
         with self._get_connection() as conn:
             conn.execute(
                 """
