@@ -6,16 +6,16 @@ from pydantic import BaseModel, Field, field_validator
 from engram.configs.active import ActiveMemoryConfig
 
 
-_VALID_VECTOR_PROVIDERS = {"qdrant", "memory", "sqlite_vec"}
+_VALID_VECTOR_PROVIDERS = {"memory", "sqlite_vec"}
 _VALID_LLM_PROVIDERS = {"gemini", "openai", "nvidia", "ollama", "mock"}
 _VALID_EMBEDDER_PROVIDERS = {"gemini", "openai", "nvidia", "ollama", "simple"}
 
 
 class VectorStoreConfig(BaseModel):
-    provider: str = Field(default="qdrant")
+    provider: str = Field(default="sqlite_vec")
     config: Dict[str, Any] = Field(
         default_factory=lambda: {
-            "path": os.path.join(os.path.expanduser("~"), ".engram", "qdrant"),
+            "path": os.path.join(os.path.expanduser("~"), ".engram", "sqlite_vec.db"),
             "collection_name": "fadem_memories",
         }
     )
@@ -277,6 +277,34 @@ class DistillationConfig(BaseModel):
         return max(1, int(v))
 
 
+class BatchConfig(BaseModel):
+    """Configuration for batch memory operations."""
+    enable_batch: bool = False    # off by default
+    max_batch_size: int = 20
+    batch_echo: bool = True
+    batch_embed: bool = True
+    batch_category: bool = True
+
+    @field_validator("max_batch_size")
+    @classmethod
+    def _clamp_batch_size(cls, v: int) -> int:
+        return min(100, max(1, int(v)))
+
+
+class ParallelConfig(BaseModel):
+    """Configuration for parallel I/O execution (ThreadPoolExecutor)."""
+    enable_parallel: bool = False   # off by default
+    max_workers: int = 4
+    parallel_add: bool = True       # echo + category in parallel during add()
+    parallel_reecho: bool = True    # parallel re-echo during search()
+    parallel_decay: bool = True     # parallel interference + redundancy during apply_decay()
+
+    @field_validator("max_workers")
+    @classmethod
+    def _clamp_workers(cls, v: int) -> int:
+        return min(32, max(1, int(v)))
+
+
 class FadeMemConfig(BaseModel):
     enable_forgetting: bool = True
     sml_decay_rate: float = 0.15
@@ -333,6 +361,8 @@ class MemoryConfig(BaseModel):
     handoff: HandoffConfig = Field(default_factory=HandoffConfig)
     active: ActiveMemoryConfig = Field(default_factory=ActiveMemoryConfig)
     distillation: DistillationConfig = Field(default_factory=DistillationConfig)
+    parallel: ParallelConfig = Field(default_factory=ParallelConfig)
+    batch: BatchConfig = Field(default_factory=BatchConfig)
 
     @field_validator("embedding_model_dims")
     @classmethod
