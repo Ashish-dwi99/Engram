@@ -34,6 +34,39 @@
 
 ---
 
+### Dashboard
+
+<p align="center">
+  <img src="docs/screenshots/board-kanban.png" alt="Kanban Board" width="720">
+  <br>
+  <em>Kanban board — drag-and-drop task management across statuses</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/coordination-agents.png" alt="Agent Coordination" width="720">
+  <br>
+  <em>Agents tab — memory-based orchestration with semantic routing and capability matching</em>
+</p>
+
+<details>
+<summary><b>More views</b></summary>
+
+<p align="center">
+  <img src="docs/screenshots/memory-view.png" alt="Memory Browser" width="720">
+  <br>
+  <em>Memory browser — search, inspect, and manage the shared memory store</em>
+</p>
+
+<p align="center">
+  <img src="docs/screenshots/chat-view.png" alt="Chat Interface" width="720">
+  <br>
+  <em>Chat — describe a task and the agent creates it on the board, or just chat</em>
+</p>
+
+</details>
+
+---
+
 ### Research Highlights
 
 <p align="center">
@@ -251,6 +284,8 @@ The web dashboard at `http://127.0.0.1:8200` includes:
 - **Agents** — Coordination dashboard: agent registry, semantic routing, event log
 - **Memory** — Browse and search the memory store
 - **Chat** — Direct agent interaction with live streaming
+
+> See [screenshots above](#dashboard) for a visual tour.
 
 7 coordination REST endpoints under `/api/coordination/`:
 

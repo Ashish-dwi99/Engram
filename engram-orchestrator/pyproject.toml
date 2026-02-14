@@ -18,7 +18,7 @@ classifiers = [
     "Programming Language :: Python :: 3",
 ]
 dependencies = [
-    "engram>=0.4.0",
+    "engram-memory>=0.4.0",
     "engram-bus>=0.1.0",
 ]
 
