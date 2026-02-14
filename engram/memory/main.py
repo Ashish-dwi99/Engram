@@ -879,7 +879,8 @@ class Memory(MemoryBase):
                 "memory": content,
             }
 
-        if not explicit_remember and is_ephemeral(content):
+        is_task_or_note = (mem_metadata or {}).get("memory_type") in ("task", "note")
+        if not explicit_remember and not is_task_or_note and is_ephemeral(content):
             return {
                 "event": "SKIP",
                 "reason": "ephemeral",
@@ -1740,6 +1741,19 @@ class Memory(MemoryBase):
             if memory.get("immutable"):
                 continue
 
+            # Task-aware decay: active tasks don't decay
+            if memory.get("memory_type") == "task":
+                _md = memory.get("metadata") or {}
+                if isinstance(_md, str):
+                    import json as _json
+                    try:
+                        _md = _json.loads(_md)
+                    except (ValueError, TypeError):
+                        _md = {}
+                _ts = _md.get("task_status", "inbox")
+                if _ts in ("inbox", "assigned", "active", "review", "blocked"):
+                    continue  # skip decay for active tasks
+
             ref_aware = feature_enabled("ENGRAM_V2_REF_AWARE_DECAY", default=False)
             ref_state = {"strong": 0, "weak": 0}
             if ref_aware:
@@ -2021,7 +2035,8 @@ class Memory(MemoryBase):
 
         # Explicit override from metadata
         explicit = metadata.get("memory_type")
-        if explicit in ("episodic", "semantic"):
+        if explicit in ("episodic", "semantic", "task", "note", "procedural",
+                       "project", "project_status", "project_tag"):
             return explicit
 
         # Distilled content is always semantic

@@ -465,6 +465,117 @@ async def list_tools() -> List[Tool]:
                 "required": ["task_summary"],
             }
         ),
+        # ---- Task tools ----
+        Tool(
+            name="create_task",
+            description="Create a task (with dedup — returns existing if title matches an active task).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "title": {"type": "string", "description": "Task title (used for dedup)"},
+                    "description": {"type": "string", "description": "Detailed description"},
+                    "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"]},
+                    "status": {"type": "string", "enum": ["inbox", "assigned", "active", "review", "blocked"]},
+                    "assigned_agent": {"type": "string", "description": "Agent to assign"},
+                    "due_date": {"type": "string", "description": "ISO date string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                    "user_id": {"type": "string"},
+                    "metadata": {"type": "object", "description": "Arbitrary user-defined attributes"},
+                },
+                "required": ["title"],
+            }
+        ),
+        Tool(
+            name="list_tasks",
+            description="List tasks with optional filters (status, priority, assignee).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "status": {"type": "string", "enum": ["inbox", "assigned", "active", "review", "blocked", "done", "archived"]},
+                    "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"]},
+                    "assigned_agent": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+            }
+        ),
+        Tool(
+            name="get_task",
+            description="Get full task details by memory ID.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task memory ID"},
+                },
+                "required": ["task_id"],
+            }
+        ),
+        Tool(
+            name="update_task",
+            description="Update task fields (status, priority, assignee, title, description, tags, due_date, or custom metadata).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task memory ID"},
+                    "status": {"type": "string", "enum": ["inbox", "assigned", "active", "review", "blocked", "done", "archived"]},
+                    "priority": {"type": "string", "enum": ["low", "normal", "high", "urgent"]},
+                    "assigned_agent": {"type": "string"},
+                    "title": {"type": "string"},
+                    "description": {"type": "string"},
+                    "due_date": {"type": "string"},
+                    "tags": {"type": "array", "items": {"type": "string"}},
+                },
+                "required": ["task_id"],
+            }
+        ),
+        Tool(
+            name="complete_task",
+            description="Mark a task as done (shorthand for update_task with status=done).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task memory ID"},
+                },
+                "required": ["task_id"],
+            }
+        ),
+        Tool(
+            name="add_task_comment",
+            description="Add a comment to a task.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "task_id": {"type": "string", "description": "Task memory ID"},
+                    "text": {"type": "string", "description": "Comment text"},
+                    "agent": {"type": "string", "description": "Agent adding the comment"},
+                },
+                "required": ["task_id", "text"],
+            }
+        ),
+        Tool(
+            name="search_tasks",
+            description="Semantic search over tasks.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Search query"},
+                    "user_id": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["query"],
+            }
+        ),
+        Tool(
+            name="get_pending_tasks",
+            description="Get actionable tasks (not done/archived).",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "user_id": {"type": "string"},
+                    "assigned_agent": {"type": "string"},
+                },
+            }
+        ),
     ]
     _tools_cache = tools
     return list(tools)
@@ -628,7 +739,25 @@ def _handle_engram_context(memory: "Memory", arguments: Dict[str, Any]) -> Any:
         }
         for m in all_memories[:limit]
     ]
-    return {"digest": digest, "total_in_store": len(all_memories), "returned": len(digest)}
+    # Surface pending tasks in context digest
+    try:
+        tm = _get_task_manager(memory)
+        pending = tm.get_pending_tasks(user_id=user_id)
+        pending_summary = [
+            {"id": t["id"], "title": t["title"], "status": t["status"], "priority": t["priority"]}
+            for t in pending[:5]
+        ]
+    except Exception:
+        pending = []
+        pending_summary = []
+
+    return {
+        "digest": digest,
+        "total_in_store": len(all_memories),
+        "returned": len(digest),
+        "pending_tasks": pending_summary,
+        "pending_task_count": len(pending),
+    }
 
 
 @_tool_handler("get_scene")
@@ -781,6 +910,105 @@ def _handle_save_session_digest(memory: "Memory", arguments: Dict[str, Any]) -> 
         key_commands=arguments.get("key_commands"),
         test_results=arguments.get("test_results"),
     )
+
+
+# ---- Task tool handlers ----
+
+def _get_task_manager(memory: "Memory"):
+    from engram.memory.tasks import TaskManager
+    return TaskManager(memory)
+
+
+@_tool_handler("create_task")
+def _handle_create_task(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    tm = _get_task_manager(memory)
+    return tm.create_task(
+        title=arguments.get("title", ""),
+        description=arguments.get("description", ""),
+        priority=arguments.get("priority"),
+        status=arguments.get("status", "inbox"),
+        assignee=arguments.get("assigned_agent"),
+        due_date=arguments.get("due_date"),
+        tags=arguments.get("tags"),
+        user_id=arguments.get("user_id", "default"),
+        extra_metadata=arguments.get("metadata"),
+    )
+
+
+@_tool_handler("list_tasks")
+def _handle_list_tasks(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    tm = _get_task_manager(memory)
+    try:
+        limit = max(1, min(500, int(arguments.get("limit", 50))))
+    except (ValueError, TypeError):
+        limit = 50
+    tasks = tm.list_tasks(
+        user_id=arguments.get("user_id", "default"),
+        status=arguments.get("status"),
+        priority=arguments.get("priority"),
+        assignee=arguments.get("assigned_agent"),
+        limit=limit,
+    )
+    return {"tasks": tasks, "total": len(tasks)}
+
+
+@_tool_handler("get_task")
+def _handle_get_task(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    tm = _get_task_manager(memory)
+    task = tm.get_task(arguments.get("task_id", ""))
+    return task if task else {"error": "Task not found"}
+
+
+@_tool_handler("update_task")
+def _handle_update_task(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    tm = _get_task_manager(memory)
+    task_id = arguments.pop("task_id", "")
+    updates = {k: v for k, v in arguments.items() if v is not None}
+    result = tm.update_task(task_id, updates)
+    return result if result else {"error": "Task not found"}
+
+
+@_tool_handler("complete_task")
+def _handle_complete_task(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    tm = _get_task_manager(memory)
+    result = tm.complete_task(arguments.get("task_id", ""))
+    return result if result else {"error": "Task not found"}
+
+
+@_tool_handler("add_task_comment")
+def _handle_add_task_comment(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    tm = _get_task_manager(memory)
+    result = tm.add_comment(
+        task_id=arguments.get("task_id", ""),
+        agent=arguments.get("agent", "unknown"),
+        text=arguments.get("text", ""),
+    )
+    return result if result else {"error": "Task not found"}
+
+
+@_tool_handler("search_tasks")
+def _handle_search_tasks(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    tm = _get_task_manager(memory)
+    try:
+        limit = max(1, min(100, int(arguments.get("limit", 10))))
+    except (ValueError, TypeError):
+        limit = 10
+    tasks = tm.search_tasks(
+        query=arguments.get("query", ""),
+        user_id=arguments.get("user_id", "default"),
+        limit=limit,
+    )
+    return {"tasks": tasks, "total": len(tasks)}
+
+
+@_tool_handler("get_pending_tasks")
+def _handle_get_pending_tasks(memory: "Memory", arguments: Dict[str, Any]) -> Any:
+    tm = _get_task_manager(memory)
+    tasks = tm.get_pending_tasks(
+        user_id=arguments.get("user_id", "default"),
+        assignee=arguments.get("assigned_agent"),
+    )
+    return {"tasks": tasks, "total": len(tasks)}
 
 
 _MEMORY_FREE_TOOLS = {"get_last_session", "save_session_digest"}

@@ -277,6 +277,27 @@ class DistillationConfig(BaseModel):
         return max(1, int(v))
 
 
+class TaskConfig(BaseModel):
+    """Configuration for tasks as first-class Engram memories."""
+    enable_tasks: bool = True
+    task_namespace: str = "tasks"
+    default_priority: str = "normal"
+    active_task_decay_rate: float = 0.0       # active tasks don't decay
+    completed_task_decay_rate: float = 0.30   # done tasks decay 2x faster
+    archived_task_decay_rate: float = 0.15    # normal rate
+    task_category_prefix: str = "tasks"
+    auto_archive_completed_days: int = 7
+
+    @field_validator("default_priority")
+    @classmethod
+    def _valid_priority(cls, v: str) -> str:
+        allowed = {"low", "normal", "high", "urgent"}
+        v = str(v).strip().lower()
+        if v not in allowed:
+            return "normal"
+        return v
+
+
 class BatchConfig(BaseModel):
     """Configuration for batch memory operations."""
     enable_batch: bool = False    # off by default
@@ -363,6 +384,7 @@ class MemoryConfig(BaseModel):
     distillation: DistillationConfig = Field(default_factory=DistillationConfig)
     parallel: ParallelConfig = Field(default_factory=ParallelConfig)
     batch: BatchConfig = Field(default_factory=BatchConfig)
+    task: TaskConfig = Field(default_factory=TaskConfig)
 
     @field_validator("embedding_model_dims")
     @classmethod

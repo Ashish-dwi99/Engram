@@ -646,6 +646,7 @@ class SQLiteManager:
         app_id: Optional[str] = None,
         layer: Optional[str] = None,
         namespace: Optional[str] = None,
+        memory_type: Optional[str] = None,
         min_strength: float = 0.0,
         include_tombstoned: bool = False,
         created_after: Optional[str] = None,
@@ -657,6 +658,9 @@ class SQLiteManager:
 
         if not include_tombstoned:
             query += " AND tombstone = 0"
+        if memory_type:
+            query += " AND memory_type = ?"
+            params.append(memory_type)
         if user_id:
             query += " AND user_id = ?"
             params.append(user_id)
