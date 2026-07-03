@@ -229,16 +229,10 @@ class SceneProcessor:
 
         # Generate summary (LLM when enabled, otherwise deterministic extractive fallback).
         memories = self.db.get_scene_memories(scene_id)
-        summary = None
-        if self.use_llm_summarization and self.llm:
-            summary = self._summarize_scene(scene, memories)
-        if not summary:
-            summary = self._extractive_scene_summary(memories)
+        summary = self._generate_scene_summary(scene, memories)
         if summary:
             updates["summary"] = summary
-            # Derive title from summary
-            title = summary.split(".")[0][:120]
-            updates["title"] = title
+            updates["title"] = self._title_from_summary(summary)
 
         if updates:
             self.db.update_scene(scene_id, updates)
@@ -269,6 +263,77 @@ class SceneProcessor:
     # ------------------------------------------------------------------
     # Summarization
     # ------------------------------------------------------------------
+
+    def summarize_scene(self, scene_id: str, *, force: bool = False) -> Optional[str]:
+        """Generate and persist a summary for an existing scene."""
+        scene = self.db.get_scene(scene_id)
+        if not scene:
+            return None
+        existing = str(scene.get("summary") or "").strip()
+        if existing and not force:
+            return existing
+
+        memories = self.db.get_scene_memories(scene_id)
+        summary = self._generate_scene_summary(scene, memories)
+        if not summary:
+            return None
+        self.db.update_scene(
+            scene_id,
+            {
+                "summary": summary,
+                "title": self._title_from_summary(summary),
+            },
+        )
+        return summary
+
+    def summarize_unsummarized(
+        self,
+        *,
+        user_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Fill missing scene summaries for a bounded maintenance slice."""
+        bounded_limit = max(1, min(int(limit), 2_000))
+        scenes = self.db.get_scenes(user_id=user_id, limit=bounded_limit)
+        summarized: List[Dict[str, Any]] = []
+        skipped_existing = 0
+        skipped_empty = 0
+
+        for scene in scenes:
+            if str(scene.get("summary") or "").strip():
+                skipped_existing += 1
+                continue
+            summary = self.summarize_scene(str(scene["id"]), force=True)
+            if not summary:
+                skipped_empty += 1
+                continue
+            summarized.append(
+                {
+                    "id": scene.get("id"),
+                    "title": self._title_from_summary(summary),
+                }
+            )
+
+        return {
+            "scanned_count": len(scenes),
+            "summarized_count": len(summarized),
+            "skipped_existing": skipped_existing,
+            "skipped_empty": skipped_empty,
+            "summaries": summarized[:50],
+            "truncated_summaries": max(0, len(summarized) - 50),
+        }
+
+    def _generate_scene_summary(
+        self,
+        scene: Dict[str, Any],
+        memories: List[Dict[str, Any]],
+    ) -> Optional[str]:
+        summary = None
+        if self.use_llm_summarization and self.llm:
+            summary = self._summarize_scene(scene, memories)
+        if not summary:
+            summary = self._extractive_scene_summary(memories)
+        return summary
 
     def _summarize_scene(
         self, scene: Dict[str, Any], memories: List[Dict[str, Any]]
@@ -318,6 +383,14 @@ class SceneProcessor:
         if not snippets:
             return None
         return " | ".join(snippets)
+
+    @staticmethod
+    def _title_from_summary(summary: str) -> str:
+        cleaned = " ".join(str(summary or "").split())
+        if not cleaned:
+            return "Untitled scene"
+        first_sentence = cleaned.split(".")[0].strip()
+        return (first_sentence or cleaned)[:120]
 
     # ------------------------------------------------------------------
     # Search

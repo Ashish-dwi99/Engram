@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from pydantic import BaseModel, Field, field_validator
@@ -12,12 +13,17 @@ from dhee.provider_defaults import (
 )
 
 
+def resolve_dhee_data_dir(path: str | os.PathLike[str]) -> str:
+    """Return an absolute Dhee data directory with user markers expanded."""
+    return os.path.abspath(os.path.expanduser(os.fspath(path)))
+
+
 def _dhee_data_dir() -> str:
     """Resolve data directory: DHEE_DATA_DIR > ~/.dhee."""
     env = os.environ.get("DHEE_DATA_DIR")
     if env:
-        return env
-    return os.path.join(os.path.expanduser("~"), ".dhee")
+        return resolve_dhee_data_dir(env)
+    return resolve_dhee_data_dir(Path.home() / ".dhee")
 
 
 _VALID_VECTOR_PROVIDERS = {"memory", "sqlite_vec", "zvec"}
@@ -180,7 +186,7 @@ class SceneConfig(BaseModel):
     scene_topic_threshold: float = 0.55    # cosine sim below this = topic shift
     auto_close_inactive_minutes: int = 120
     max_scene_memories: int = 50
-    use_llm_summarization: bool = False
+    use_llm_summarization: bool = True
     summary_regenerate_threshold: int = 5
 
 

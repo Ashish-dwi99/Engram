@@ -36,6 +36,7 @@ from dhee.configs.base import (
     LLMConfig,
     MemoryConfig,
     VectorStoreConfig,
+    resolve_dhee_data_dir,
 )
 from dhee.memory.main import FullMemory
 from dhee.provider_defaults import (
@@ -187,8 +188,8 @@ def _get_data_dir() -> Path:
     """Get the data directory for Dhee storage."""
     data_dir = os.environ.get("DHEE_DATA_DIR")
     if data_dir:
-        return Path(data_dir)
-    return Path.home() / ".dhee"
+        return Path(resolve_dhee_data_dir(data_dir))
+    return Path(resolve_dhee_data_dir(Path.home() / ".dhee"))
 
 
 class Engram:
@@ -229,7 +230,7 @@ class Engram:
             self._provider = "mock"
         if in_memory and data_dir is None:
             data_dir = tempfile.mkdtemp(prefix="dhee_")
-        self._data_dir = Path(data_dir) if data_dir else _get_data_dir()
+        self._data_dir = Path(resolve_dhee_data_dir(data_dir)) if data_dir else _get_data_dir()
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
         # Build configuration. The persistent default is zvec. If a live memory
@@ -356,6 +357,7 @@ class Engram:
         scope: Optional[str] = None,
         source_app: Optional[str] = None,
         infer: bool = False,
+        context_messages: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """Add a memory.
 
@@ -391,6 +393,7 @@ class Engram:
             scope=scope,
             source_app=source_app,
             infer=infer,
+            context_messages=context_messages,
         )
 
     def search(
@@ -586,6 +589,19 @@ class Engram:
         """
         return self._memory.get_stats(user_id=user_id, agent_id=agent_id)
 
+    def provider_health(self) -> Dict[str, Any]:
+        """Return a live health check for the configured model provider."""
+        llm = getattr(self._memory, "llm", None)
+        ping = getattr(llm, "ping", None)
+        if callable(ping):
+            return ping()
+        return {
+            "ok": self._provider == "mock",
+            "status": "ready" if self._provider == "mock" else "not_supported",
+            "provider": self._provider,
+            "model": getattr(llm, "model", None),
+        }
+
     def repair_memory_quality(
         self,
         user_id: Optional[str] = None,
@@ -673,6 +689,14 @@ class Engram:
             max_batches=max_batches,
         )
 
+    def reextract(
+        self,
+        user_id: str = "default",
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Requeue complete memories that have no structured engram facts."""
+        return self.memory.reextract(user_id=user_id, limit=limit)
+
     def close(self) -> None:
         """Release runtime resources held by the underlying memory engine."""
         self._memory.close()
@@ -743,6 +767,7 @@ class Dhee:
         content: str,
         user_id: Optional[str] = None,
         metadata: Optional[Dict[str, Any]] = None,
+        context_messages: Optional[List[Dict[str, str]]] = None,
     ) -> Dict[str, Any]:
         """Store a fact, preference, or observation.
 
@@ -766,7 +791,13 @@ class Dhee:
         if tier != "smriti":
             meta["tier"] = tier
 
-        result = self._engram.add(content, user_id=uid, infer=False, metadata=meta or None)
+        result = self._engram.add(
+            content,
+            user_id=uid,
+            infer=False,
+            metadata=meta or None,
+            context_messages=context_messages,
+        )
         response: Dict[str, Any] = {"stored": True}
         memory_id = None
         if isinstance(result, dict):
@@ -799,6 +830,14 @@ class Dhee:
         if intention:
             response["detected_intention"] = intention.to_dict()
         return response
+
+    def reextract(
+        self,
+        user_id: Optional[str] = None,
+        limit: int = 100,
+    ) -> Dict[str, Any]:
+        """Requeue complete memories that have no structured engram facts."""
+        return self._engram.reextract(user_id=user_id or self._user_id, limit=limit)
 
     def sweep_admission(
         self,

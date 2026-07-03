@@ -8,7 +8,7 @@ from typing import Any, Dict, Optional
 DEFAULT_PROVIDER = "nvidia"
 DEFAULT_COLLECTION = "dhee"
 
-DEFAULT_NVIDIA_LLM_MODEL = "moonshotai/kimi-k2.5"
+DEFAULT_NVIDIA_LLM_MODEL = "moonshotai/kimi-k2.6"
 DEFAULT_NVIDIA_EMBEDDER_MODEL = "nvidia/llama-nemotron-embed-vl-1b-v2"
 DEFAULT_NVIDIA_RERANK_MODEL = "nvidia/llama-nemotron-rerank-vl-1b-v2"
 DEFAULT_NVIDIA_EMBEDDING_DIMS = 2048

@@ -1,7 +1,7 @@
 import logging
 import os
 import time
-from typing import Optional
+from typing import Any, Dict, Optional
 
 from dhee.llms.base import BaseLLM
 from dhee.provider_defaults import DEFAULT_NVIDIA_LLM_MODEL
@@ -58,6 +58,40 @@ class NvidiaLLM(BaseLLM):
         self.max_tokens = self.config.get("max_tokens", 4096)
         self.top_p = self.config.get("top_p", 0.7)
         self.enable_thinking = self.config.get("enable_thinking", False)
+
+    def ping(self) -> Dict[str, Any]:
+        """Check that the configured NVIDIA model accepts a minimal chat call."""
+        started = time.perf_counter()
+        try:
+            response = self.client.chat.completions.create(
+                model=self.model,
+                messages=[{"role": "user", "content": "Reply with OK."}],
+                temperature=0,
+                top_p=1,
+                max_tokens=2,
+                stream=False,
+            )
+            content = ""
+            if getattr(response, "choices", None):
+                content = str(response.choices[0].message.content or "").strip()
+            return {
+                "ok": True,
+                "status": "ready",
+                "provider": "nvidia",
+                "model": self.model,
+                "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+                "response_preview": content[:20],
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                "status": "unavailable",
+                "provider": "nvidia",
+                "model": self.model,
+                "latency_ms": round((time.perf_counter() - started) * 1000, 2),
+                "error_type": type(exc).__name__,
+                "error": str(exc),
+            }
 
     def generate(self, prompt: str) -> str:
         from openai import APITimeoutError, APIConnectionError

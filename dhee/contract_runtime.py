@@ -741,17 +741,14 @@ def guard_router_call(tool_name: str, arguments: Dict[str, Any]) -> Dict[str, An
             "repo": str(repo_root),
         })
         if mode == "deny":
-            # Even in deny mode a supervisor outage must leave a recovery
-            # path open: read-only tools cannot violate a contract, and the
-            # dhee CLI is how the agent repairs the runtime state.
             command = str(arguments.get("command") or "").strip()
-            recoverable = tool_name in _READ_TOOL_NAMES or tool_name in _GREP_TOOL_NAMES or (
-                tool_name in _BASH_TOOL_NAMES and command.startswith("dhee ")
+            recoverable = tool_name in {"Read", "Grep"} or (
+                tool_name == "Bash" and command.startswith("dhee ")
             )
             if recoverable:
                 warning = (
                     "Contract supervisor unavailable; deny mode allowed this "
-                    "read-only/remediation call."
+                    "native read-only/remediation call."
                 )
                 _record_enforcement_warning(
                     repo_root,
