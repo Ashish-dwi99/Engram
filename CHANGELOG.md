@@ -4,6 +4,17 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.2.5] - 2026-07-03 - Clear-water lifecycle repair
+
+- Updated the default NVIDIA extraction/generation model to
+  `moonshotai/kimi-k2.6` and added a live provider model ping in Dhee doctor.
+- Enabled scene summarization by default and wired lifecycle enrichment to fill
+  missing scene summaries with deterministic fallback summaries.
+- Added scene-noise audit and repair for operational/test prompt scenes,
+  tombstoning active noise while preserving it as episodic events.
+- Expanded `DHEE_DATA_DIR` tildes consistently and hardened pytest data-dir
+  isolation so fixture users do not write into the live vault by accident.
+
 ## [7.2.4] - 2026-07-02 - Clear-water memory enrichment
 
 - Deferred enrichment now runs structured engram extraction and marks honest

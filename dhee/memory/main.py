@@ -6,11 +6,14 @@ import logging
 import math
 import os
 import re
+import shutil
+import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, date, timezone
 from enum import Enum
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 from dhee.configs.base import MemoryConfig
@@ -76,6 +79,19 @@ from dhee.utils.factory import EmbedderFactory, LLMFactory, VectorStoreFactory
 from dhee.utils.prompts import AGENT_MEMORY_EXTRACTION_PROMPT, MEMORY_EXTRACTION_PROMPT
 
 logger = logging.getLogger(__name__)
+
+_SCENE_BENCHMARK_NOISE_RE = re.compile(
+    r"\b(?:you are fixing a real bug|benchmark prompt|swe-bench|fail[- ]to[- ]pass)\b",
+    re.IGNORECASE,
+)
+_SCENE_OPERATIONAL_VERB_RE = re.compile(
+    r"^\s*(?:edited|wrote|created|updated|modified|touched)\s+(.{1,240})\s*$",
+    re.IGNORECASE,
+)
+_SCENE_PATH_HINT_RE = re.compile(
+    r"(?:^|\s)(?:/|~/|\./|[\w.-]+\.(?:py|js|ts|tsx|jsx|go|rs|java|rb|php|sh|sql|toml|yaml|yml|json|md)\b)",
+    re.IGNORECASE,
+)
 
 # ---------------------------------------------------------------------------
 # Inline helpers (formerly in deleted core/acceptance and core/policy modules)
@@ -1159,11 +1175,17 @@ class FullMemory(SmartMemory, SceneProfileMixin):
         max_batches: int = 5,
     ) -> Dict[str, Any]:
         """Batch-enrich memories that were stored with deferred enrichment."""
-        return self._write_pipeline.enrich_pending(
+        result = self._write_pipeline.enrich_pending(
             user_id=user_id,
             batch_size=batch_size,
             max_batches=max_batches,
         )
+        if self.scene_processor:
+            result["scene_summaries"] = self.scene_processor.summarize_unsummarized(
+                user_id=user_id,
+                limit=max(1, min(int(batch_size) * int(max_batches), 500)),
+            )
+        return result
 
     def reextract(
         self,
@@ -1953,6 +1975,146 @@ class FullMemory(SmartMemory, SceneProfileMixin):
                 break
         return memories
 
+    @staticmethod
+    def _scene_noise_kind(scene: Dict[str, Any]) -> Optional[str]:
+        title = str(scene.get("title") or "").strip()
+        summary = str(scene.get("summary") or "").strip()
+        topic = str(scene.get("topic") or "").strip()
+        text = "\n".join(part for part in (title, summary, topic) if part)
+        if not text:
+            return None
+        if _SCENE_BENCHMARK_NOISE_RE.search(text):
+            return "benchmark_prompt_scene"
+        operational = _SCENE_OPERATIONAL_VERB_RE.match(title)
+        if operational and _SCENE_PATH_HINT_RE.search(operational.group(1)):
+            return "operational_scene"
+        return None
+
+    def _scene_noise_candidates(
+        self,
+        *,
+        user_id: Optional[str],
+        limit: int,
+    ) -> List[Dict[str, Any]]:
+        bounded_limit = max(1, min(int(limit), 50_000))
+        query = """
+            SELECT id, user_id, title, summary, topic, start_time, end_time
+            FROM scenes
+            WHERE tombstone = 0
+        """
+        params: List[Any] = []
+        if user_id:
+            query += " AND user_id = ?"
+            params.append(user_id)
+        query += " ORDER BY start_time DESC LIMIT ?"
+        params.append(bounded_limit)
+        with self.db._get_connection() as conn:
+            rows = [dict(row) for row in conn.execute(query, params).fetchall()]
+
+        candidates: List[Dict[str, Any]] = []
+        for row in rows:
+            kind = self._scene_noise_kind(row)
+            if not kind:
+                continue
+            row["noise_kind"] = kind
+            candidates.append(row)
+        return candidates
+
+    def _backup_history_db(self, reason: str) -> Optional[str]:
+        raw_path = getattr(self.config, "history_db_path", None)
+        if not raw_path:
+            return None
+        db_path = Path(str(raw_path)).expanduser().resolve()
+        if not db_path.exists():
+            return None
+        timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        backup_dir = db_path.parent / "backups"
+        backup_dir.mkdir(parents=True, exist_ok=True)
+        backup_path = backup_dir / f"{db_path.stem}-{reason}-{timestamp}{db_path.suffix}"
+        shutil.copy2(db_path, backup_path)
+        return str(backup_path)
+
+    def _tombstone_scene_noise(
+        self,
+        candidates: List[Dict[str, Any]],
+        *,
+        dry_run: bool,
+    ) -> Dict[str, Any]:
+        counts = {
+            "scene_noise_tombstoned": 0,
+            "operational_scenes_tombstoned": 0,
+            "benchmark_scenes_tombstoned": 0,
+            "scene_noise_events_written": 0,
+        }
+        if not candidates:
+            return {**counts, "scene_noise_backup": None}
+
+        for scene in candidates:
+            if scene["noise_kind"] == "operational_scene":
+                counts["operational_scenes_tombstoned"] += 1
+            elif scene["noise_kind"] == "benchmark_prompt_scene":
+                counts["benchmark_scenes_tombstoned"] += 1
+        counts["scene_noise_tombstoned"] = len(candidates)
+        if dry_run:
+            return {**counts, "scene_noise_backup": None}
+
+        backup_path = self._backup_history_db("scene-noise")
+        now = datetime.now(timezone.utc).isoformat()
+        events: List[Dict[str, Any]] = []
+        for scene in candidates:
+            scene_id = str(scene["id"])
+            event_time = str(scene.get("start_time") or scene.get("end_time") or now)
+            event_type = (
+                "operational_event"
+                if scene["noise_kind"] == "operational_scene"
+                else "test_fixture"
+            )
+            value_text = str(scene.get("title") or scene.get("summary") or scene_id)
+            events.append(
+                {
+                    "id": f"scene-noise:{scene_id}",
+                    "memory_id": f"scene:{scene_id}",
+                    "user_id": scene.get("user_id") or "default",
+                    "conversation_id": None,
+                    "session_id": None,
+                    "turn_id": 0,
+                    "actor_id": "dhee_scene_repair",
+                    "actor_role": "maintenance",
+                    "event_time": event_time,
+                    "event_type": event_type,
+                    "canonical_key": f"scene_noise:{scene['noise_kind']}:{scene_id}",
+                    "value_text": value_text,
+                    "value_num": None,
+                    "value_unit": None,
+                    "currency": None,
+                    "normalized_time_start": event_time,
+                    "normalized_time_end": event_time,
+                    "time_granularity": "instant",
+                    "entity_key": str(scene.get("topic") or scene.get("title") or scene_id)[:240],
+                    "value_norm": " ".join(value_text.lower().split())[:500],
+                    "confidence": 1.0,
+                    "superseded_by": None,
+                }
+            )
+        counts["scene_noise_events_written"] = self.db.add_episodic_events(events)
+        scene_ids = [(str(scene["id"]),) for scene in candidates]
+        with self.db._get_connection() as conn:
+            conn.executemany(
+                "UPDATE scenes SET tombstone = 1, strength = 0.0 WHERE id = ?",
+                scene_ids,
+            )
+            try:
+                conn.executemany(
+                    "UPDATE memories SET scene_id = NULL WHERE scene_id = ?",
+                    scene_ids,
+                )
+            except sqlite3.OperationalError as exc:
+                if "no such column" not in str(exc).lower():
+                    raise
+        with self.db._get_connection() as conn:
+            conn.execute("VACUUM")
+        return {**counts, "scene_noise_backup": backup_path}
+
     def get_stats(self, user_id: Optional[str] = None, agent_id: Optional[str] = None) -> Dict[str, Any]:
         memories = self._get_quality_health_memories(user_id=user_id, agent_id=agent_id)
         sml_count = sum(1 for m in memories if m.get("layer") == "sml")
@@ -2094,6 +2256,9 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             "evidence_without_distillation": 0,
             "contract_repairs_available": 0,
             "profile_contamination": 0,
+            "scene_noise": 0,
+            "operational_scene_noise": 0,
+            "benchmark_scene_noise": 0,
         }
         samples: Dict[str, List[Dict[str, Any]]] = {
             "unresolved_test_noise": [],
@@ -2104,6 +2269,7 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             "damaged_canonical": [],
             "evidence_without_distillation": [],
             "profile_contamination": [],
+            "scene_noise": [],
         }
 
         def _sample(memory: Dict[str, Any], issue: str, updates: List[str]) -> None:
@@ -2242,6 +2408,26 @@ class FullMemory(SmartMemory, SceneProfileMixin):
                     }
                 )
 
+        scene_noise = self._scene_noise_candidates(user_id=user_id, limit=limit)
+        counts["scene_noise"] = len(scene_noise)
+        for scene in scene_noise:
+            if scene["noise_kind"] == "operational_scene":
+                counts["operational_scene_noise"] += 1
+            elif scene["noise_kind"] == "benchmark_prompt_scene":
+                counts["benchmark_scene_noise"] += 1
+            bucket = samples.setdefault("scene_noise", [])
+            if len(bucket) < 8:
+                bucket.append(
+                    {
+                        "id": scene.get("id"),
+                        "user_id": scene.get("user_id"),
+                        "noise_kind": scene.get("noise_kind"),
+                        "title": scene.get("title"),
+                    }
+                )
+        if scene_noise:
+            counts["contract_repairs_available"] += len(scene_noise)
+
         checks: List[Dict[str, Any]] = []
 
         def _check(name: str, passed: bool, severity: str, detail: str) -> None:
@@ -2323,6 +2509,12 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             "critical",
             f"{counts['profile_contamination']} derived profile anchors contain tool/test/doc noise.",
         )
+        _check(
+            "no_scene_noise",
+            counts["scene_noise"] == 0,
+            "critical",
+            f"{counts['scene_noise']} operational/test prompt scenes remain active.",
+        )
 
         failed_critical = [check for check in checks if check["severity"] == "critical" and not check["passed"]]
         failed_warnings = [check for check in checks if check["severity"] == "warning" and not check["passed"]]
@@ -2335,6 +2527,8 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             recommended_actions.append("Run repair_memory_quality with dry_run=false, then rerun this audit.")
         if counts["degraded_or_queued"]:
             recommended_actions.append("Run enrich_pending after repair to reconcile queued/degraded rows.")
+        if counts["scene_noise"]:
+            recommended_actions.append("Run repair_memory_quality with dry_run=false to tombstone operational/test prompt scenes.")
         if require_personal_model and counts["canonical_personal"] == 0:
             recommended_actions.append("Ingest explicit goals, preferences, decisions, style, and product philosophy as canonical personal memories.")
         if profile_l and counts["canonical_profile_matches"] == 0:
@@ -2404,6 +2598,10 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             "queued_reopened": 0,
             "malformed_metadata_normalized": 0,
             "profiles_cleaned": 0,
+            "scene_noise_tombstoned": 0,
+            "operational_scenes_tombstoned": 0,
+            "benchmark_scenes_tombstoned": 0,
+            "scene_noise_events_written": 0,
         }
         for memory in memories:
             raw_metadata = memory.get("metadata")
@@ -2520,11 +2718,31 @@ class FullMemory(SmartMemory, SceneProfileMixin):
             if not dry_run:
                 self.db.update_profile(str(profile["id"]), updates)
 
+        scene_noise = self._scene_noise_candidates(user_id=user_id, limit=limit)
+        for scene in scene_noise:
+            repaired.append(
+                {
+                    "id": scene.get("id"),
+                    "memory_class": scene.get("noise_kind"),
+                    "updates": ["tombstone", "episodic_event"],
+                    "title": scene.get("title"),
+                }
+            )
+        scene_repair = self._tombstone_scene_noise(scene_noise, dry_run=dry_run)
+        for key in (
+            "scene_noise_tombstoned",
+            "operational_scenes_tombstoned",
+            "benchmark_scenes_tombstoned",
+            "scene_noise_events_written",
+        ):
+            counts[key] = int(scene_repair.get(key, 0) or 0)
+
         result = {
             "dry_run": dry_run,
             "scanned_count": len(memories),
             "repair_count": len(repaired),
             **counts,
+            "scene_noise_backup": scene_repair.get("scene_noise_backup"),
             "repairs": repaired[:200],
             "truncated_repairs": max(0, len(repaired) - 200),
         }

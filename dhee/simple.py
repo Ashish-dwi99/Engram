@@ -36,6 +36,7 @@ from dhee.configs.base import (
     LLMConfig,
     MemoryConfig,
     VectorStoreConfig,
+    resolve_dhee_data_dir,
 )
 from dhee.memory.main import FullMemory
 from dhee.provider_defaults import (
@@ -187,8 +188,8 @@ def _get_data_dir() -> Path:
     """Get the data directory for Dhee storage."""
     data_dir = os.environ.get("DHEE_DATA_DIR")
     if data_dir:
-        return Path(data_dir)
-    return Path.home() / ".dhee"
+        return Path(resolve_dhee_data_dir(data_dir))
+    return Path(resolve_dhee_data_dir(Path.home() / ".dhee"))
 
 
 class Engram:
@@ -229,7 +230,7 @@ class Engram:
             self._provider = "mock"
         if in_memory and data_dir is None:
             data_dir = tempfile.mkdtemp(prefix="dhee_")
-        self._data_dir = Path(data_dir) if data_dir else _get_data_dir()
+        self._data_dir = Path(resolve_dhee_data_dir(data_dir)) if data_dir else _get_data_dir()
         self._data_dir.mkdir(parents=True, exist_ok=True)
 
         # Build configuration. The persistent default is zvec. If a live memory
@@ -587,6 +588,19 @@ class Engram:
             Dict with total, sml_count, lml_count, categories
         """
         return self._memory.get_stats(user_id=user_id, agent_id=agent_id)
+
+    def provider_health(self) -> Dict[str, Any]:
+        """Return a live health check for the configured model provider."""
+        llm = getattr(self._memory, "llm", None)
+        ping = getattr(llm, "ping", None)
+        if callable(ping):
+            return ping()
+        return {
+            "ok": self._provider == "mock",
+            "status": "ready" if self._provider == "mock" else "not_supported",
+            "provider": self._provider,
+            "model": getattr(llm, "model", None),
+        }
 
     def repair_memory_quality(
         self,

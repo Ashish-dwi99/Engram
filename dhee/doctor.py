@@ -49,6 +49,7 @@ class DoctorReport:
     generated_at: float = 0.0
     core: dict[str, Any] = field(default_factory=dict)
     runtime: dict[str, Any] = field(default_factory=dict)
+    provider_health: dict[str, Any] = field(default_factory=dict)
     router: dict[str, Any] = field(default_factory=dict)
     context: dict[str, Any] = field(default_factory=dict)
     cognition: dict[str, Any] = field(default_factory=dict)
@@ -62,6 +63,7 @@ class DoctorReport:
             "generated_at": self.generated_at,
             "core": self.core,
             "runtime": self.runtime,
+            "provider_health": self.provider_health,
             "router": self.router,
             "context": self.context,
             "cognition": self.cognition,
@@ -121,6 +123,61 @@ def _runtime_section() -> dict[str, Any]:
         return status()
     except Exception as exc:
         return {"error": f"{type(exc).__name__}: {exc}"}
+
+
+def _provider_health_section() -> dict[str, Any]:
+    try:
+        from dhee.cli_config import get_api_key, load_config
+        from dhee.provider_defaults import provider_defaults
+    except Exception as exc:
+        return {"ok": False, "status": "config_error", "error": f"{type(exc).__name__}: {exc}"}
+
+    config = load_config()
+    provider = str(config.get("provider") or "nvidia").strip().lower()
+    defaults = provider_defaults(provider)
+    model = str(config.get("llm_model") or defaults.get("llm_model") or "").strip()
+    if provider != "nvidia":
+        return {
+            "ok": None,
+            "status": "not_implemented",
+            "provider": provider,
+            "model": model,
+        }
+
+    api_key = get_api_key(provider)
+    if not api_key:
+        return {
+            "ok": False,
+            "status": "missing_api_key",
+            "provider": provider,
+            "model": model,
+            "required_env": defaults.get("env_var"),
+        }
+
+    try:
+        from dhee.llms.nvidia import NvidiaLLM
+
+        llm = NvidiaLLM(
+            {
+                "api_key": api_key,
+                "model": model,
+                "temperature": 0,
+                "max_tokens": 2,
+                "timeout": 8,
+                "max_retries": 0,
+                "app_retries": 1,
+            }
+        )
+        return llm.ping()
+    except Exception as exc:
+        return {
+            "ok": False,
+            "status": "unavailable",
+            "provider": provider,
+            "model": model,
+            "error_type": type(exc).__name__,
+            "error": str(exc),
+        }
 
 
 def _context_section() -> dict[str, Any]:
@@ -597,6 +654,7 @@ def build_report() -> DoctorReport:
 
     core = _core_section()
     runtime = _runtime_section()
+    provider_health = _provider_health_section()
     router = _router_section()
     context = _context_section()
     cognition = _cognition_section()
@@ -609,6 +667,7 @@ def build_report() -> DoctorReport:
         generated_at=time.time(),
         core=core,
         runtime=runtime,
+        provider_health=provider_health,
         router=router,
         context=context,
         cognition=cognition,
@@ -627,6 +686,7 @@ def format_human(report: DoctorReport) -> str:
     lines: list[str] = []
     core = report.core
     runtime = report.runtime
+    provider_health = report.provider_health
     router = report.router
     context = report.context
     cog = report.cognition
@@ -672,6 +732,17 @@ def format_human(report: DoctorReport) -> str:
             lines.append("  health:      ok")
         lines.append(f"  managed venv:{' present' if venv.get('exists') else ' missing'} ({venv.get('path')})")
         lines.append(f"  runtime dir: {paths.get('runtime_dir')}")
+    lines.append("")
+
+    # Provider health
+    lines.append("[ provider health ]")
+    lines.append(f"  provider:    {provider_health.get('provider', '?')}")
+    lines.append(f"  model:       {provider_health.get('model', '?')}")
+    lines.append(f"  status:      {provider_health.get('status', '?')}")
+    if provider_health.get("latency_ms") is not None:
+        lines.append(f"  latency:     {provider_health.get('latency_ms')} ms")
+    if provider_health.get("error_type"):
+        lines.append(f"  error:       {provider_health.get('error_type')}: {provider_health.get('error')}")
     lines.append("")
 
     # Router

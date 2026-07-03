@@ -8,7 +8,9 @@ dependency, no MCP framework coupling.
 from __future__ import annotations
 
 import os
+import shlex
 import subprocess
+import sys
 import time
 import hashlib
 from pathlib import Path
@@ -650,6 +652,16 @@ def handle_dhee_bash(arguments: Dict[str, Any]) -> Dict[str, Any]:
     cmd = str(arguments.get("command", "")).strip()
     if not cmd:
         return {"error": "command is required"}
+    for prefix in ("python3 -m ", "python -m "):
+        if cmd.startswith(prefix):
+            cmd = f"{shlex.quote(sys.executable)} -m {cmd[len(prefix):]}"
+            break
+    else:
+        if cmd == "pytest" or cmd.startswith("pytest "):
+            suffix = cmd[len("pytest"):].lstrip()
+            cmd = f"{shlex.quote(sys.executable)} -m pytest"
+            if suffix:
+                cmd = f"{cmd} {suffix}"
     from dhee.contract_runtime import command_preview, guard_router_call, record_router_observation, router_refusal, router_result_runtime
 
     contract_guard = guard_router_call("dhee_bash", arguments)
@@ -687,10 +699,25 @@ def handle_dhee_bash(arguments: Dict[str, Any]) -> Dict[str, Any]:
 
     started = time.perf_counter()
     timed_out = False
+    env = os.environ.copy()
+    python_bin = str(Path(sys.executable).resolve().parent)
+    env["PATH"] = (
+        python_bin
+        if not env.get("PATH")
+        else os.pathsep.join([python_bin, str(env["PATH"])])
+    )
+    if cwd:
+        existing_pythonpath = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = (
+            str(cwd)
+            if not existing_pythonpath
+            else os.pathsep.join([str(cwd), existing_pythonpath])
+        )
     try:
         proc = subprocess.run(
             [os.environ.get("SHELL") or "/bin/sh", "-lc", cmd],
             cwd=cwd,
+            env=env,
             capture_output=True,
             timeout=timeout,
             text=False,

@@ -268,10 +268,29 @@ def _execute_command(repo_root: Path, command: str, timeout_sec: int) -> Dict[st
             "stderr_tail": reason,
             "observation": {"blocked_reason": reason},
         }
+    normalized_parts = list(parts or [])
+    if normalized_parts[:2] in (["python", "-m"], ["python3", "-m"]):
+        normalized_parts[0] = sys.executable
+    elif normalized_parts and normalized_parts[0] == "pytest":
+        normalized_parts = [sys.executable, "-m", "pytest", *normalized_parts[1:]]
+    env = os.environ.copy()
+    python_bin = str(Path(sys.executable).resolve().parent)
+    env["PATH"] = (
+        python_bin
+        if not env.get("PATH")
+        else os.pathsep.join([python_bin, str(env["PATH"])])
+    )
+    existing_pythonpath = env.get("PYTHONPATH")
+    env["PYTHONPATH"] = (
+        str(repo_root)
+        if not existing_pythonpath
+        else os.pathsep.join([str(repo_root), existing_pythonpath])
+    )
     try:
         proc = subprocess.run(
-            list(parts or []),
+            normalized_parts,
             cwd=str(repo_root),
+            env=env,
             text=True,
             capture_output=True,
             timeout=max(1, int(timeout_sec or DEFAULT_TIMEOUT_SEC)),
