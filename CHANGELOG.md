@@ -4,6 +4,13 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.2.6] - 2026-07-11 - Hyper-context skill read fix
+
+- Fixed `AttributeError: 'Skill' object has no attribute 'get'` in
+  `buddhi.get_hyper_context`: skill stores may return Skill objects or dicts;
+  the context builder now reads both instead of silently degrading the
+  relevant-skills section on every call.
+
 ## [7.2.5] - 2026-07-03 - Clear-water lifecycle repair
 
 - Updated the default NVIDIA extraction/generation model to

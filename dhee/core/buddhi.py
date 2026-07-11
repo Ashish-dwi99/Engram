@@ -454,12 +454,19 @@ class Buddhi:
                 store = memory.skill_store
                 if store:
                     results = store.search(task_description, limit=5)
+
+                    # skill stores may return dicts or Skill objects; read both.
+                    def _skill_field(record, name, default):
+                        if isinstance(record, dict):
+                            return record.get(name, default)
+                        return getattr(record, name, default)
+
                     skills = [
                         {
-                            "name": r.get("name", ""),
-                            "description": r.get("description", ""),
-                            "confidence": r.get("confidence", 0.5),
-                            "used_count": r.get("used_count", 0),
+                            "name": _skill_field(r, "name", ""),
+                            "description": _skill_field(r, "description", ""),
+                            "confidence": _skill_field(r, "confidence", 0.5),
+                            "used_count": _skill_field(r, "used_count", 0),
                         }
                         for r in (results if isinstance(results, list) else [])
                     ]
