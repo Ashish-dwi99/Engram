@@ -170,7 +170,7 @@ class MemoryOSService:
             world_store=WorldMemoryStore(str(memory_os_dir / "world_memory.db")),
             graph_store=SessionGraphStore(str(runtime_root / "capture" / "sessions")),
             memory_client=DheeMemoryClient(memory),
-            graph_projection=CausalGraphProjection(str(memory_os_dir / "causal_scene.kuzu")),
+            graph_projection=CausalGraphProjection.if_available(str(memory_os_dir / "causal_scene.kuzu")),
         )
 
     def _ensure_default_policies(self) -> None:
@@ -1303,6 +1303,10 @@ class MemoryOSService:
 
     def _require_causal_projection(self) -> CausalGraphProjection:
         if not self.graph_projection:
+            from .causal_graph import KUZU_AVAILABLE, KUZU_INSTALL_HINT
+
+            if not KUZU_AVAILABLE:
+                raise RuntimeError(KUZU_INSTALL_HINT)
             raise RuntimeError("Causal graph projection is not configured")
         return self.graph_projection
 

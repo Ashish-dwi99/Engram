@@ -6,7 +6,17 @@ import shutil
 from pathlib import Path
 from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
-import kuzu
+try:
+    import kuzu
+except ImportError:  # optional dependency; no cp314+ wheels exist
+    kuzu = None  # type: ignore[assignment]
+
+KUZU_AVAILABLE = kuzu is not None
+KUZU_INSTALL_HINT = (
+    "Causal graph features need the optional kuzu dependency: "
+    "pip install 'dhee[graph]' (requires Python <= 3.13; kuzu ships no "
+    "wheels for newer Pythons). Memory capture and recall work without it."
+)
 
 from .capture_store import CaptureStore
 from .schema import (
@@ -34,6 +44,8 @@ class CausalGraphProjection:
     """Kuzu projection over the SQLite causal-scene truth tables."""
 
     def __init__(self, db_path: str):
+        if not KUZU_AVAILABLE:
+            raise RuntimeError(KUZU_INSTALL_HINT)
         path = Path(db_path).expanduser()
         if path.suffix:
             self.db_path = path
@@ -42,6 +54,13 @@ class CausalGraphProjection:
             self.root_dir = path
             self.db_path = path / "causal_scene.kuzu"
         self.root_dir.mkdir(parents=True, exist_ok=True)
+
+    @classmethod
+    def if_available(cls, db_path: str) -> Optional["CausalGraphProjection"]:
+        """Build a projection, or None when kuzu is not installed."""
+        if not KUZU_AVAILABLE:
+            return None
+        return cls(db_path)
 
     def rebuild(self, capture_store: CaptureStore, *, user_id: str = "default") -> Dict[str, Any]:
         self.delete()

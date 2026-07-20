@@ -4,6 +4,22 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.2.7] - 2026-07-20 - Kuzu made optional (Python 3.14 install fix)
+
+- Moved `kuzu` out of core dependencies: it ships no wheels for Python 3.14+
+  (upstream development has stopped), so `pip install dhee` on a 3.14 machine
+  tried to compile the Kùzu C++ engine from source and bricked the install.
+  Core capture, checkpoints, embedding recall, and all four MCP tools work
+  without it.
+- The causal-scene graph projection now degrades cleanly when kuzu is absent:
+  `CausalGraphProjection.if_available()` returns `None`, checkpoint sync
+  no-ops, and `dhee causal` / `dhee graph` commands raise an actionable
+  install hint (`pip install 'dhee[graph]'`, Python <= 3.13) instead of an
+  import crash. The graph stays a derived projection — SQLite remains truth,
+  and `dhee graph rebuild` reconstructs it after installing the extra.
+- `graph` and `all` extras carry a `python_version < '3.14'` marker so no
+  install path ever attempts the source build.
+
 ## [7.2.6] - 2026-07-11 - Hyper-context skill read fix
 
 - Fixed `AttributeError: 'Skill' object has no attribute 'get'` in

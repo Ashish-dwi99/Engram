@@ -263,7 +263,7 @@ def _get_memory_os_service(*, with_memory: bool = False):
         world_store=WorldMemoryStore(str(memory_os_dir / "world_memory.db")),
         graph_store=SessionGraphStore(str(runtime_root / "capture" / "sessions")),
         memory_client=memory_client,
-        graph_projection=CausalGraphProjection(str(memory_os_dir / "causal_scene.kuzu")),
+        graph_projection=CausalGraphProjection.if_available(str(memory_os_dir / "causal_scene.kuzu")),
     )
 
 
@@ -2063,7 +2063,11 @@ def cmd_graph(args: argparse.Namespace) -> None:
     service = _get_memory_os_service(with_memory=False)
     projection = service.graph_projection
     if projection is None:
-        raise RuntimeError("Causal graph projection is not configured")
+        from dhee.world_memory.causal_graph import KUZU_AVAILABLE, KUZU_INSTALL_HINT
+
+        raise RuntimeError(
+            KUZU_INSTALL_HINT if not KUZU_AVAILABLE else "Causal graph projection is not configured"
+        )
 
     action = args.graph_action
     user_id = getattr(args, "user_id", "default")

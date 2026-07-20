@@ -4,6 +4,8 @@ from pathlib import Path
 
 import pytest
 
+pytest.importorskip("kuzu", reason="causal graph tests need the optional dhee[graph] extra")
+
 from dhee.core.learnings import LearningExchange
 from dhee.world_memory.capture_store import CaptureStore
 from dhee.world_memory.causal_graph import CausalGraphProjection
