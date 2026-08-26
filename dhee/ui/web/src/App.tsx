@@ -28,6 +28,7 @@ import {
 import { RouterView } from "./views/RouterView";
 import { TasksView } from "./views/TasksView";
 import { WorkspaceView } from "./views/WorkspaceView";
+import { MorphoGraph } from "./components/MorphoGraph";
 
 const CanvasView = lazy(() =>
   import("./views/CanvasView").then((module) => ({ default: module.CanvasView }))
@@ -75,6 +76,7 @@ function normalizeView(view: View | string | null): View {
     raw === "router/history"
   )
     return "router/sessionshistory";
+  if (raw === "morpho") return "morpho" as View;
   return (raw as View) || "command";
 }
 
@@ -637,6 +639,8 @@ export default function App() {
       return <PortabilityTrustView />;
     if (view === "conflicts")
       return <ConflictView viewer={viewer} onChanged={refreshInbox} />;
+    if (view === "morpho")
+      return <MorphoGraph memoryId="all" />;
     return null;
   };
 

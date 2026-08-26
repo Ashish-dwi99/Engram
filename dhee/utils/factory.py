@@ -95,6 +95,10 @@ class EmbedderFactory:
             from dhee.embeddings.qwen import QwenEmbedder
 
             return QwenEmbedder(config)
+        if provider == "openrouter":
+            from dhee.embeddings.openrouter import OpenRouterEmbedder
+
+            return OpenRouterEmbedder(config)
         raise ValueError(f"Unsupported embedder provider: {provider}")
 
     @classmethod

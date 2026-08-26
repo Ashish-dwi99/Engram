@@ -1,0 +1,43 @@
+// Dhee Memory Ontology rules in MorphoHDL
+// ----------------------------------------
+// Cells represent Dhee Graph nodes (Entities and Memories).
+// Wires/Signals represent relations (CAUSED_BY, SHARED_ENTITY).
+
+cell Entity(name, type, weight) {
+    // Basic visualization rule: entities pulse if heavily weighted
+    state active = 0.0;
+    
+    // When a signal hits this entity, it grows slightly and emits back
+    on_signal(wire_in) {
+        active = 1.0;
+        emit(all_wires, 0.5);
+    }
+    
+    update {
+        active = active * 0.95; // exponential decay
+        visualize(color=(0.2, 0.8, 0.4, active + 0.2), radius=weight * 10.0 + (active * 5.0));
+    }
+}
+
+cell Memory(content, depth) {
+    state access_count = 0;
+    
+    on_signal(wire_in) {
+        access_count = access_count + 1;
+        // High access divides the memory (fragmentation/detail expansion)
+        if (access_count > 100) {
+            divide(Memory(content, depth + 1), Memory(content, depth + 1));
+        }
+    }
+    
+    update {
+        visualize(color=(0.1, 0.4, 0.9, 0.8), radius=15.0 - depth);
+    }
+}
+
+// Global Force-directed layout params
+layout {
+    repulsion = 2.0;
+    spring_length = 50.0;
+    gravity = 0.01;
+}

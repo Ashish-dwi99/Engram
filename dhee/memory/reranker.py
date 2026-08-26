@@ -240,6 +240,76 @@ class Qwen3Reranker:
         return results
 
 
+class OpenRouterReranker:
+    """Cross-encoder reranking over OpenRouter's ``/rerank`` route.
+
+    Same model as :class:`NvidiaReranker` reaches through NIM, but on the key the host
+    already has. Two differences from the NIM surface worth knowing: the route is
+    ``/rerank`` (``/reranking`` is a 404 here), and the request field is ``documents``
+    of plain strings rather than ``passages`` of objects. Scores come back as
+    ``relevance_score``, higher being more relevant.
+    """
+
+    _DEFAULT_BASE_URL = "https://openrouter.ai/api/v1"
+    _DEFAULT_MODEL = "nvidia/llama-nemotron-rerank-vl-1b-v2:free"
+
+    def __init__(self, config: Optional[Dict[str, Any]] = None):
+        config = config or {}
+        self.model = config.get("model", self._DEFAULT_MODEL)
+        api_key_env = config.get("api_key_env", "OPENROUTER_API_KEY")
+        self.api_key = config.get("api_key") or os.getenv(api_key_env)
+        if not self.api_key:
+            raise ValueError(
+                f"OpenRouter API key required for reranker. Set config['api_key'] or {api_key_env}."
+            )
+        base_url = str(config.get("base_url") or self._DEFAULT_BASE_URL).rstrip("/")
+        self.url = config.get("url", f"{base_url}/rerank")
+        self.timeout = config.get("timeout", 30)
+        self.max_retries = config.get("max_retries", 2)
+
+    def rerank(self, query: str, passages: List[str], top_n: int = 0) -> List[Dict[str, Any]]:
+        if not passages:
+            return []
+        if len(passages) == 1:
+            return [{"index": 0, "logit": 0.0, "text": passages[0]}]
+
+        payload: Dict[str, Any] = {"model": self.model, "query": query, "documents": passages}
+        if top_n > 0:
+            payload["top_n"] = top_n
+        headers = {"Authorization": f"Bearer {self.api_key}", "Content-Type": "application/json"}
+
+        last_exc: Optional[Exception] = None
+        for attempt in range(self.max_retries + 1):
+            try:
+                resp = requests.post(self.url, json=payload, headers=headers, timeout=self.timeout)
+                resp.raise_for_status()
+                rows = resp.json().get("results") or []
+                results = []
+                for row in rows:
+                    try:
+                        index = int(row["index"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if not 0 <= index < len(passages):
+                        continue
+                    score = row.get("relevance_score", row.get("score", row.get("logit")))
+                    if score is None:
+                        continue
+                    results.append({"index": index, "logit": float(score), "text": passages[index]})
+                results.sort(key=lambda item: item["logit"], reverse=True)
+                return results[:top_n] if top_n > 0 else results
+            except Exception as exc:  # noqa: BLE001 - retried, then reported below
+                last_exc = exc
+                if attempt < self.max_retries:
+                    time.sleep(1.5 * (2**attempt))
+
+        # Reranking is a refinement, not a gate. Losing it should cost ordering
+        # quality, never the answer itself, so the caller sees an empty list and
+        # falls back to vector order.
+        logger.warning("OpenRouter rerank failed (model=%s): %s", self.model, last_exc)
+        return []
+
+
 def create_reranker(config: Optional[Dict[str, Any]] = None):
     """Factory: create a reranker from config, or return None if disabled."""
     if not config:
@@ -249,5 +319,7 @@ def create_reranker(config: Optional[Dict[str, Any]] = None):
         return NvidiaReranker(config)
     if provider == "qwen":
         return Qwen3Reranker(config)
+    if provider == "openrouter":
+        return OpenRouterReranker(config)
     logger.warning("Unknown reranker provider: %s", provider)
     return None

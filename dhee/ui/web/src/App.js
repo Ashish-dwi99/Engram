@@ -13,6 +13,7 @@ import { CommandCenterView, HandoffHubView, LearningInboxView, PortabilityTrustV
 import { RouterView } from "./views/RouterView";
 import { TasksView } from "./views/TasksView";
 import { WorkspaceView } from "./views/WorkspaceView";
+import { MorphoGraph } from "./components/MorphoGraph";
 const CanvasView = lazy(() => import("./views/CanvasView").then((module) => ({ default: module.CanvasView })));
 const DEFAULT_TWEAKS = {
     accentHue: "36",
@@ -57,6 +58,8 @@ function normalizeView(view) {
         raw === "router/session-history" ||
         raw === "router/history")
         return "router/sessionshistory";
+    if (raw === "morpho")
+        return "morpho";
     return raw || "command";
 }
 function initialParam(name) {
@@ -493,6 +496,8 @@ export default function App() {
             return _jsx(PortabilityTrustView, {});
         if (view === "conflicts")
             return _jsx(ConflictView, { viewer: viewer, onChanged: refreshInbox });
+        if (view === "morpho")
+            return _jsx(MorphoGraph, { memoryId: "all" });
         return null;
     };
     useEffect(() => {

@@ -4,6 +4,47 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/), and this project adheres to [Semantic Versioning](https://semver.org/).
 
+## [7.3.0] - 2026-07-29 - Document corpus lane
+
+- **New `dhee.corpus` package: a third lane beside beliefs and world memory.**
+  Belief memory answers "what is true about the user and the work"; a corpus
+  answers "what does this folder of documents say". They must not share a store:
+  `dhee/memory/quality.py` deliberately classifies `doc_chunk` and anything
+  carrying a `source_path` as artifact-like rather than belief, so that a
+  thousand fragments of a PDF cannot drown a handful of real beliefs. Documents
+  now have a place they are supposed to live instead of a filter they have to
+  survive. The corpus keeps its own tables and its own vector collection, and is
+  never admitted into memory.
+
+- **Folder change tracking shaped like git's object model** (`dhee.corpus.tree`).
+  Files are addressed by the sha256 of their bytes, directories are Merkle nodes
+  hashed from their sorted children, and a stat cache carries hashes forward for
+  files whose size and mtime are both unchanged. The result is that re-indexing
+  costs O(changed) rather than O(files): a rename or a move is detected as one
+  file rather than a delete plus an add, and so never re-extracts or re-embeds;
+  duplicate content across folders is extracted and embedded once; and a re-scan
+  of a settled folder does no network work at all. That last property is what
+  makes attaching a filesystem watcher safe.
+
+- **Page-aware chunking with citations** (`dhee.corpus.extract`,
+  `dhee.corpus.search`). Chunks never straddle a page boundary and carry their
+  page through to the answer, because a retrieval hit is only worth as much as
+  the citation attached to it. Retrieval is vector recall then cross-encoder
+  rerank; a missing or failing reranker degrades to vector order rather than
+  failing the search.
+
+- **Extraction is injected, not imported** (`TextExtractor` protocol). Dhee ships
+  a plain-text and text-layer-PDF reader so the corpus works standalone; OCR is a
+  large bundle that belongs to the host application. Dhee still installs and runs
+  on its own.
+
+- **New `openrouter` embedder** (`dhee.embeddings.openrouter`) and
+  `OpenRouterReranker`. Two things about that API are easy to lose time on: the
+  public `/models` listing returns chat models only, so embedding and reranking
+  models look absent until you query `/models/{id}/endpoints`; and `dimensions`
+  must not be sent, since the vector width is fixed by the model. Both are
+  handled here, with batching and retry-with-backoff.
+
 ## [7.2.7] - 2026-07-20 - Kuzu made optional (Python 3.14 install fix)
 
 - Moved `kuzu` out of core dependencies: it ships no wheels for Python 3.14+

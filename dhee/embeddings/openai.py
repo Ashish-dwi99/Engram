@@ -22,10 +22,29 @@ class OpenAIEmbedder(BaseEmbedder):
         self.client = OpenAI(**client_kwargs)
         self.model = self.config.get("model", "text-embedding-3-large")
         self.embedding_dims = self.config.get("embedding_dims")
+        #: How the vectors come back over the wire.
+        #:
+        #: Stated, because the OpenAI SDK does not leave it alone: when numpy is
+        #: importable it silently asks for `base64` as a transfer optimisation.
+        #: OpenAI serves that; several OpenAI-COMPATIBLE endpoints do not, and
+        #: this class is pointed at them constantly — an `nvidia/*` model through
+        #: OpenRouter answers `400 Nvidia embeddings do not support base64
+        #: encoding`, once per chunk, so a book is never indexed and nothing says
+        #: why. `float` is what the API documents as the default and every
+        #: implementation accepts; the SDK decodes both to the same list of
+        #: floats, so nothing downstream can tell the difference.
+        #:
+        #: `embeddings/nvidia.py` has always passed it. This is the same fix on
+        #: the generic client, which is what a compatible provider actually uses.
+        self.encoding_format = self.config.get("encoding_format", "float")
 
     def embed(self, text: str, memory_action: Optional[str] = None) -> List[float]:
         try:
-            kwargs = {"model": self.model, "input": text}
+            kwargs = {
+                "model": self.model,
+                "input": text,
+                "encoding_format": self.encoding_format,
+            }
             if self.embedding_dims:
                 kwargs["dimensions"] = int(self.embedding_dims)
             response = self.client.embeddings.create(**kwargs)
@@ -45,7 +64,11 @@ class OpenAIEmbedder(BaseEmbedder):
         if len(texts) == 1:
             return [self.embed(texts[0], memory_action=memory_action)]
         try:
-            kwargs = {"model": self.model, "input": texts}
+            kwargs = {
+                "model": self.model,
+                "input": texts,
+                "encoding_format": self.encoding_format,
+            }
             if self.embedding_dims:
                 kwargs["dimensions"] = int(self.embedding_dims)
             response = self.client.embeddings.create(**kwargs)

@@ -16,6 +16,7 @@ export function NavRail({ view, setView, conflictCount, }) {
             tip: "Proposals · findings · conflicts",
             badge: conflictCount,
         },
+        { id: "morpho", icon: "⎈", label: "MORPHO", tip: "High-performance visual neural graph" },
     ];
     return (_jsxs("div", { style: {
             width: "var(--nav)",
@@ -37,6 +38,8 @@ export function NavRail({ view, setView, conflictCount, }) {
                     flexDirection: "column",
                     padding: "6px 0",
                     gap: 0,
+                    overflowY: "auto",
+                    overflowX: "hidden"
                 }, children: items.map((item) => {
                     const active = item.id === "router"
                         ? view === "router" || view.startsWith("router/")

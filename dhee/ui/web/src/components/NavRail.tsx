@@ -13,7 +13,8 @@ type View =
   | "replay"
   | "learnings"
   | "portability"
-  | "conflicts";
+  | "conflicts"
+  | "morpho";
 
 export function NavRail({
   view,
@@ -46,6 +47,7 @@ export function NavRail({
       tip: "Proposals · findings · conflicts",
       badge: conflictCount,
     },
+    { id: "morpho", icon: "⎈", label: "MORPHO", tip: "High-performance visual neural graph" },
   ];
   return (
     <div
@@ -81,6 +83,8 @@ export function NavRail({
           flexDirection: "column",
           padding: "6px 0",
           gap: 0,
+          overflowY: "auto",
+          overflowX: "hidden"
         }}
       >
         {items.map((item) => {

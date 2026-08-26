@@ -587,6 +587,274 @@ def create_app(*, serve_static: bool = True, dev_mode: bool = False) -> FastAPI:
             _memory_os_service = MemoryOSService.from_default_runtime(memory=_get_memory())
         return _memory_os_service
 
+    @app.get("/api/morpho/graph")
+    def morpho_graph() -> Dict[str, Any]:
+        """Build a rich visual graph from Dhee's SQLite history.
+
+        Nodes: memories, entities (deduplicated), categories, facts, profiles, episodes, scenes.
+        Edges: entity→memory links, memory→memory links, category membership, scene→episode, scene→memory.
+        """
+        import sqlite3 as _sqlite3
+        from pathlib import Path as _Path
+
+        db_path = _Path.home() / ".engram" / "history.db"
+        if not db_path.exists():
+            return {"nodes": [], "edges": [], "stats": {"error": "history.db not found"}}
+
+        try:
+            conn = _sqlite3.connect(str(db_path))
+            conn.row_factory = _sqlite3.Row
+
+            nodes: list[Dict[str, Any]] = []
+            edges: list[Dict[str, Any]] = []
+            node_id_map: Dict[str, int] = {}  # id -> node index
+
+            # ── 1. Memories ──
+            rows = conn.execute(
+                "SELECT id, substr(memory,1,120) as label, categories, strength, "
+                "memory_type, created_at, importance FROM memories WHERE tombstone=0"
+            ).fetchall()
+            for r in rows:
+                idx = len(nodes)
+                mid = r["id"]
+                node_id_map[mid] = idx
+                cats_raw = r["categories"] or "[]"
+                try:
+                    cats = json.loads(cats_raw) if isinstance(cats_raw, str) else []
+                except Exception:
+                    cats = []
+                nodes.append({
+                    "id": mid,
+                    "label": r["label"] or "",
+                    "type": "memory",
+                    "subtype": r["memory_type"] or "semantic",
+                    "strength": float(r["strength"] or 0.5),
+                    "importance": float(r["importance"] or 0.5),
+                    "categories": cats,
+                    "created": r["created_at"] or "",
+                })
+
+            # ── 2. Categories ──
+            cat_rows = conn.execute(
+                "SELECT name, description, memory_count FROM categories"
+            ).fetchall()
+            cat_id_map: Dict[str, int] = {}
+            for cr in cat_rows:
+                idx = len(nodes)
+                cname = cr["name"]
+                cat_id_map[cname.lower()] = idx
+                node_id_map[f"cat:{cname}"] = idx
+                nodes.append({
+                    "id": f"cat:{cname}",
+                    "label": cname,
+                    "type": "category",
+                    "subtype": "",
+                    "strength": 1.0,
+                    "importance": min(1.0, (cr["memory_count"] or 0) / 50),
+                    "categories": [],
+                    "created": "",
+                    "description": cr["description"] or "",
+                    "memory_count": cr["memory_count"] or 0,
+                })
+
+            # Link memories → categories
+            for ni, n in enumerate(nodes):
+                if n["type"] == "memory":
+                    for cat in n.get("categories", []):
+                        cat_key = cat.lower() if isinstance(cat, str) else ""
+                        if cat_key in cat_id_map:
+                            edges.append({"source": ni, "target": cat_id_map[cat_key], "type": "belongs_to"})
+
+            # ── 3. Entities (deduplicated) ──
+            try:
+                ent_rows = conn.execute(
+                    "SELECT name, entity_type, memory_id FROM engram_entities"
+                ).fetchall()
+                entity_key_map: Dict[str, int] = {}  # "name|type" -> node index
+                for er in ent_rows:
+                    ename = er["name"]
+                    etype = er["entity_type"] or "unknown"
+                    ekey = f"{ename}|{etype}"
+                    mid = er["memory_id"]
+    
+                    if ekey not in entity_key_map:
+                        idx = len(nodes)
+                        entity_key_map[ekey] = idx
+                        node_id_map[f"ent:{ekey}"] = idx
+                        nodes.append({
+                            "id": f"ent:{ekey}",
+                            "label": ename,
+                            "type": "entity",
+                            "subtype": etype,
+                            "strength": 0.8,
+                            "importance": 0.6,
+                            "categories": [],
+                            "created": "",
+                        })
+    
+                    # Link entity → memory
+                    ent_idx = entity_key_map[ekey]
+                    if mid in node_id_map:
+                        edges.append({"source": ent_idx, "target": node_id_map[mid], "type": "extracted_from"})
+            except _sqlite3.OperationalError:
+                pass # Table might not exist in older DBs
+
+            # ── 4. Engram Links (memory → memory) ──
+            try:
+                link_rows = conn.execute(
+                    "SELECT source_memory_id, target_memory_id, link_type, qualifier FROM engram_links"
+                ).fetchall()
+                for lr in link_rows:
+                    src = lr["source_memory_id"]
+                    tgt = lr["target_memory_id"]
+                    if src in node_id_map and tgt and tgt in node_id_map:
+                        edges.append({
+                            "source": node_id_map[src],
+                            "target": node_id_map[tgt],
+                            "type": lr["link_type"] or "related",
+                            "qualifier": lr["qualifier"] or "",
+                        })
+            except _sqlite3.OperationalError:
+                pass
+
+            # ── 5. Facts ──
+            try:
+                fact_rows = conn.execute(
+                    "SELECT id, subject, predicate, value, confidence, memory_id FROM engram_facts LIMIT 200"
+                ).fetchall()
+                for fr in fact_rows:
+                    idx = len(nodes)
+                    fid = fr["id"]
+                    node_id_map[fid] = idx
+                    nodes.append({
+                        "id": fid,
+                        "label": f"{fr['subject']}: {fr['predicate']} = {str(fr['value'])[:50]}",
+                        "type": "fact",
+                        "subtype": fr["predicate"] or "",
+                        "strength": float(fr["confidence"] or 1.0),
+                        "importance": float(fr["confidence"] or 1.0),
+                        "categories": [],
+                        "created": "",
+                    })
+                    mid = fr["memory_id"]
+                    if mid in node_id_map and node_id_map[mid] != idx:
+                        edges.append({"source": idx, "target": node_id_map[mid], "type": "fact_of"})
+            except _sqlite3.OperationalError:
+                pass
+
+            # ── 6. Profiles ──
+            try:
+                prof_rows = conn.execute(
+                    "SELECT id, name, profile_type, strength, created_at FROM profiles"
+                ).fetchall()
+                for pr in prof_rows:
+                    idx = len(nodes)
+                    pid = pr["id"]
+                    node_id_map[pid] = idx
+                    nodes.append({
+                        "id": pid,
+                        "label": pr["name"] or "",
+                        "type": "profile",
+                        "subtype": pr["profile_type"] or "contact",
+                        "strength": float(pr["strength"] or 1.0),
+                        "importance": 0.8,
+                        "categories": [],
+                        "created": pr["created_at"] or "",
+                    })
+            except _sqlite3.OperationalError:
+                pass
+
+            # ── 7. Episodes ──
+            try:
+                ep_rows = conn.execute(
+                    "SELECT id, title, status, created_at FROM episodes"
+                ).fetchall()
+                for er in ep_rows:
+                    idx = len(nodes)
+                    eid = er["id"]
+                    node_id_map[eid] = idx
+                    nodes.append({
+                        "id": eid,
+                        "label": er["title"] or "",
+                        "type": "episode",
+                        "subtype": er["status"] or "open",
+                        "strength": 1.0,
+                        "importance": 0.7,
+                        "categories": [],
+                        "created": er["created_at"] or "",
+                    })
+            except _sqlite3.OperationalError:
+                pass
+
+            # ── 8. Scenes ──
+            try:
+                sc_rows = conn.execute(
+                    "SELECT id, title, episode_id, strength, importance, created_at FROM scenes WHERE tombstone=0"
+                ).fetchall()
+                for sr in sc_rows:
+                    idx = len(nodes)
+                    sid = sr["id"]
+                    node_id_map[sid] = idx
+                    nodes.append({
+                        "id": sid,
+                        "label": sr["title"] or "",
+                        "type": "scene",
+                        "subtype": "",
+                        "strength": float(sr["strength"] or 1.0),
+                        "importance": float(sr["importance"] or 0.5),
+                        "categories": [],
+                        "created": sr["created_at"] or "",
+                    })
+                    # Link scene -> episode
+                    ep_id = sr["episode_id"]
+                    if ep_id and ep_id in node_id_map:
+                        edges.append({"source": idx, "target": node_id_map[ep_id], "type": "part_of"})
+            except _sqlite3.OperationalError:
+                pass
+
+            # ── 9. Scene Memories ──
+            try:
+                sm_rows = conn.execute(
+                    "SELECT scene_id, memory_id FROM scene_memories"
+                ).fetchall()
+                for sm in sm_rows:
+                    sid = sm["scene_id"]
+                    mid = sm["memory_id"]
+                    if sid in node_id_map and mid in node_id_map:
+                        edges.append({"source": node_id_map[sid], "target": node_id_map[mid], "type": "context_of"})
+            except _sqlite3.OperationalError:
+                pass
+
+            conn.close()
+
+            # Deduplicate edges
+            seen_edges: set[tuple[int, int]] = set()
+            unique_edges = []
+            for e in edges:
+                key = (e["source"], e["target"])
+                if key not in seen_edges:
+                    seen_edges.add(key)
+                    unique_edges.append(e)
+
+            return {
+                "nodes": nodes,
+                "edges": unique_edges,
+                "stats": {
+                    "node_count": len(nodes),
+                    "edge_count": len(unique_edges),
+                    "memories": sum(1 for n in nodes if n["type"] == "memory"),
+                    "entities": sum(1 for n in nodes if n["type"] == "entity"),
+                    "categories": sum(1 for n in nodes if n["type"] == "category"),
+                    "facts": sum(1 for n in nodes if n["type"] == "fact"),
+                    "profiles": sum(1 for n in nodes if n["type"] == "profile"),
+                    "episodes": sum(1 for n in nodes if n["type"] == "episode"),
+                    "scenes": sum(1 for n in nodes if n["type"] == "scene"),
+                },
+            }
+        except Exception as exc:
+            log.error("morpho_graph failed: %s", exc)
+            return {"nodes": [], "edges": [], "stats": {"error": str(exc)}}
+
     @app.get("/api/memories")
     def list_memories(limit: int = 500) -> Dict[str, Any]:
         try:
